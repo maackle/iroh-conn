@@ -15,7 +15,7 @@ tokio::spawn({
   async move {
     while let Some(incoming) = endpoint.accept().await {
       let conn = incoming.await?;
-      conn_manager.handle_connection(conn).await?;
+      conn_manager.handle_incoming_connection(conn).await?;
     }
     anyhow::Ok(())
   }
@@ -90,8 +90,9 @@ impl ConnectionManager {
     }
 
     /// TODO docs
-    #[tracing::instrument(skip_all)]
-    pub async fn handle_connection(&self, conn: Connection) -> Result<()> {
+    #[tracing::instrument(skip_all, fields(node = self.endpoint().node_id().fmt_short(), remote = conn.remote_node_id()?.fmt_short()))]
+    pub async fn handle_incoming_connection(&self, conn: Connection) -> Result<()> {
+        tracing::debug!(conn = conn.stable_id(), "handling incoming connection");
         let remote_node_id = conn.remote_node_id()?;
 
         let alpn = conn
@@ -144,9 +145,10 @@ impl ConnectionManager {
     }
 
     /// TODO docs
+    #[tracing::instrument(skip_all, fields(node = self.endpoint().node_id().fmt_short(), remote = remote_addr.clone().into().node_id.fmt_short()))]
     pub async fn get_or_open_connection(
         &self,
-        remote_addr: impl Into<NodeAddr>,
+        remote_addr: impl Into<NodeAddr> + Clone,
         alpn: &[u8],
     ) -> Result<Connection> {
         let remote_addr = remote_addr.into();
@@ -169,22 +171,31 @@ impl ConnectionManager {
                     .await?;
                 let conn = connecting.await?;
                 spot.insert(conn.clone());
+                tracing::debug!(conn = conn.stable_id(), "opening new connection");
                 conn
             }
 
             // We have accepted connections for this - re-use them.
-            (Entry::Vacant(_), Entry::Occupied(accepted_conns)) => accepted_conns
-                .get()
-                .values()
-                // Filter out closed connections as a best-effort in case they were closed while we were holding the lock
-                .filter(|conn| conn.close_reason().is_none())
-                // Hmm. Using "lowest RTT" as an arbitrary measure now.
-                .min_by_key(|conn| conn.rtt())
-                .expect("always one conn in ConnectionSet entry")
-                .clone(),
+            (Entry::Vacant(_), Entry::Occupied(accepted_conns)) => {
+                let conn = accepted_conns
+                    .get()
+                    .values()
+                    // Filter out closed connections as a best-effort in case they were closed while we were holding the lock
+                    .filter(|conn| conn.close_reason().is_none())
+                    // Hmm. Using "lowest RTT" as an arbitrary measure now.
+                    .min_by_key(|conn| conn.rtt())
+                    .expect("always one conn in ConnectionSet entry")
+                    .clone();
+                tracing::debug!(conn = conn.stable_id(), "reusing accepted connection");
+                conn
+            }
 
             // We have already initiated a connection for this - reuse it.
-            (Entry::Occupied(initiated_conn), Entry::Vacant(_)) => initiated_conn.get().clone(),
+            (Entry::Occupied(initiated_conn), Entry::Vacant(_)) => {
+                let conn = initiated_conn.get().clone();
+                tracing::debug!(conn = conn.stable_id(), "reusing initiated connection");
+                conn
+            }
 
             // We have both initiated a connection for this, but also accepted some - potentially close ours.
             (Entry::Occupied(initiated_conn), Entry::Occupied(accepted_conns)) => {
@@ -203,9 +214,15 @@ impl ConnectionManager {
                         .min_by_key(|conn| conn.rtt())
                         .expect("always one conn in ConnectionSet entry")
                         .clone();
+                    tracing::debug!(
+                        conn = best_conn.stable_id(),
+                        "closing initiated connection to use accepted connection"
+                    );
                     best_conn
                 } else {
-                    initiated_conn.get().clone()
+                    let conn = initiated_conn.get().clone();
+                    tracing::debug!(conn = conn.stable_id(), "keeping initiated connection");
+                    conn
                 }
             }
         };
