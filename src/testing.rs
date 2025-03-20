@@ -2,7 +2,7 @@ use std::{io::Write, time::Instant};
 
 use iroh::Endpoint;
 
-pub async fn await_fully_connected(endpoints: impl IntoIterator<Item = Endpoint>) {
+pub async fn await_fully_connected(endpoints: impl IntoIterator<Item = &Endpoint>) {
     let start = Instant::now();
     print!("awaiting fully connected ");
     let endpoints = endpoints.into_iter().collect::<Vec<_>>();

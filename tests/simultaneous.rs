@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::Result;
 use futures::{
     FutureExt,
-    future::{self, BoxFuture},
+    future::{self, BoxFuture, join_all},
 };
 use iroh::{Endpoint, endpoint::Connection};
 use iroh_conn::{
@@ -18,13 +18,9 @@ const ECHO_DELAY: Duration = Duration::from_millis(100);
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_two_simultaneous() -> Result<()> {
-    setup_tracing("two=info,iroh_conn=info");
+    setup_tracing("simultaneous=info,iroh_conn=info");
 
-    let n1 = TestNode::new().await?;
-    let n2 = TestNode::new().await?;
-    println!("1: {}", n1.endpoint().node_id().fmt_short());
-    println!("2: {}", n2.endpoint().node_id().fmt_short());
-    await_fully_connected([n1.endpoint().clone(), n2.endpoint().clone()]).await;
+    let [n1, n2] = TestNode::cluster(TestHandler).await?;
 
     // First simultaneous call fails
     TestNode::rpc_cycle([&n1, &n2], b"hello").await.unwrap_err();
@@ -35,14 +31,36 @@ async fn test_two_simultaneous() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_two_simultaneous_warmed() -> Result<()> {
-    setup_tracing("two=info,iroh_conn=info");
+async fn test_three_simultaneous() -> Result<()> {
+    setup_tracing("simultaneous=info,iroh_conn=info");
 
-    let n1 = TestNode::new().await?;
-    let n2 = TestNode::new().await?;
-    println!("1: {}", n1.endpoint().node_id().fmt_short());
-    println!("2: {}", n2.endpoint().node_id().fmt_short());
-    await_fully_connected([n1.endpoint().clone(), n2.endpoint().clone()]).await;
+    let [n1, n2, n3] = TestNode::cluster(TestHandler).await?;
+    TestNode::rpc_cycle([&n1, &n2, &n3], b"hello").await?;
+    TestNode::rpc_cycle([&n1, &n2, &n3], b"hello").await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_interweaved() -> Result<()> {
+    setup_tracing("simultaneous=info,iroh_conn=info");
+
+    let [n1, n2, n3] = TestNode::cluster(TestHandler).await?;
+    join_all([
+        TestNode::rpc_cycle([&n1, &n2], b"hello"),
+        TestNode::rpc_cycle([&n2, &n3], b"hello"),
+        TestNode::rpc_cycle([&n3, &n1], b"hello"),
+    ])
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_two_simultaneous_warmed() -> Result<()> {
+    setup_tracing("simultaneous=info,iroh_conn=info");
+
+    let [n1, n2] = TestNode::cluster(TestHandler).await?;
 
     // First "warm" the connections by having a clear opener and acceptor
     println!("\nCALL 1 -> 2\n");
@@ -68,21 +86,37 @@ async fn test_two_simultaneous_warmed() -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, derive_more::Deref)]
+#[derive(Clone, Debug, derive_more::Deref)]
 pub struct TestNode {
     #[deref]
     manager: ConnectionManager,
 }
 
 impl TestNode {
-    pub async fn new() -> Result<Self> {
+    pub async fn new(handler: impl ConnectionHandler) -> Result<Self> {
         let endpoint = Endpoint::builder()
             .alpns(vec![ALPN.to_vec()])
             .discovery_local_network()
             .bind()
             .await?;
-        let manager = ConnectionManager::new(endpoint.clone(), TestHandler);
+        let manager = ConnectionManager::new(endpoint.clone(), handler);
         Ok(Self { manager })
+    }
+
+    pub async fn cluster<const N: usize>(
+        handler: impl ConnectionHandler + Clone,
+    ) -> Result<[Self; N]> {
+        let nodes =
+            future::join_all(std::iter::repeat_with(|| TestNode::new(handler.clone())).take(N))
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>>>()?;
+        let endpoints = nodes
+            .iter()
+            .map(|n| n.manager.endpoint())
+            .collect::<Vec<_>>();
+        await_fully_connected(endpoints).await;
+        Ok(nodes.try_into().unwrap())
     }
 
     #[tracing::instrument(skip_all, fields(node = self.endpoint().node_id().fmt_short(), remote = n.endpoint().node_id().fmt_short()))]
@@ -138,6 +172,7 @@ impl TestNode {
     }
 }
 
+#[derive(Clone)]
 pub struct TestHandler;
 
 impl ConnectionHandler for TestHandler {

@@ -16,7 +16,7 @@ async fn trivial() -> Result<()> {
     let e1 = Node::spawn().await;
     let e2 = Node::spawn().await;
 
-    await_fully_connected(vec![e1.endpoint.clone(), e2.endpoint.clone()]).await;
+    await_fully_connected(vec![&e1.endpoint, &e2.endpoint]).await;
 
     println!("\nCALL 1 -> 2\n");
     e1.send(e2.node_id(), "aloha").await?;

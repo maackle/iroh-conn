@@ -1,35 +1,6 @@
 //! A connection manager to ensure roughly one open connection between peers,
 //! if possible.
 
-/*
-USAGE:
-
-
-// I have an endpoint:
-let endpoint = // ...;
-let conn_manager = ConnectionManager::new(endpoint.clone());
-// I start an accept loop, let's bypass the router, and use our own:
-tokio::spawn({
-  let endpoint = endpoint.clone();
-  let conn_manager = conn_manager.clone();
-  async move {
-    while let Some(incoming) = endpoint.accept().await {
-      let conn = incoming.await?;
-      conn_manager.handle_incoming_connection(conn).await?;
-    }
-    anyhow::Ok(())
-  }
-});
-// Now I can "just" grab myself the "best" connection every via the connection manager:
-let conn = conn_manager.get_or_open_connection(remote_node_id, b"echo/0").await?;
-// do stuff with the conn.
-// As a general rule-of-thumb: keep the connection open
-// Once we shutdown:
-endpoint.close().await;
-
-
-*/
-
 use std::{
     collections::{BTreeMap, btree_map::Entry},
     future::Future,
@@ -47,26 +18,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info_span};
 
-// pub trait ConnectionManager: Clone {
-//     fn new(endpoint: Endpoint) -> Self;
-
-//     fn open_connection(
-//         &self,
-//         target: iroh::NodeId,
-//     ) -> impl Future<Output = anyhow::Result<iroh::endpoint::Connection>> + Send;
-
-//     fn handle_connection(&self, conn: Connection) -> Result<()>;
-
-//     fn endpoint(&self) -> Endpoint;
-
-// }
-
-// impl ConnectionManager for MathiasManager {
-//     fn new(endpoint: Endpoint) -> Self {
-//         MathiasManager::new(endpoint)
-//     }
-
-// }
+use crate::event::Event;
 
 pub trait ConnectionHandler: Send + Sync + 'static {
     fn handle(&self, conn: Connection) -> BoxFuture<'static, Result<()>>;
@@ -377,3 +329,5 @@ impl iroh::protocol::ProtocolHandler for ConnectionManager {
         .boxed()
     }
 }
+
+fn emit_event(event: Event) {}
