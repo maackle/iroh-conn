@@ -68,6 +68,26 @@ use tracing::{Instrument, info_span};
 
 // }
 
+pub trait ConnectionHandler: Send + Sync + 'static {
+    fn handle(&self, conn: Connection) -> BoxFuture<'static, Result<()>>;
+
+    fn open(
+        &self,
+        endpoint: Endpoint,
+        alpn: Alpn,
+        remote_node_id: NodeId,
+    ) -> BoxFuture<'static, Result<Connection>> {
+        async move {
+            let conn = endpoint
+                .connect_with_opts(remote_node_id, &alpn, ConnectOptions::new())
+                .await?
+                .await?;
+            Ok(conn)
+        }
+        .boxed()
+    }
+}
+
 /// A connection manager.
 ///
 /// Tries to de-duplicate connections between its endpoint and other nodes.
@@ -83,18 +103,7 @@ pub struct ConnectionManager {
     connections: Arc<Mutex<Connections>>,
 
     #[debug(skip)]
-    open_connection: Option<
-        Arc<
-            dyn Fn(NodeId) -> BoxFuture<'static, anyhow::Result<Connection>>
-                + Send
-                + Sync
-                + 'static,
-        >,
-    >,
-    #[debug(skip)]
-    handle_connection: Option<
-        Arc<dyn Fn(Connection) -> BoxFuture<'static, anyhow::Result<()>> + Send + Sync + 'static>,
-    >,
+    handler: Arc<dyn ConnectionHandler>,
 
     // Handling subtask cancellation, aborted on drop
     cancel: CancellationToken,
@@ -109,36 +118,26 @@ impl ConnectionManager {
     const CLOSE_CONNECTION_SUPERSEDED_MSG: &[u8] = b"ConnectionManager: Connection superseded";
 
     /// TODO docs
-    pub fn new(endpoint: Endpoint) -> Self {
-        Self {
-            endpoint,
+    pub fn new(endpoint: Endpoint, handler: impl ConnectionHandler) -> Self {
+        let manager = Self {
+            endpoint: endpoint.clone(),
             connections: Default::default(),
-            open_connection: None,
-            handle_connection: None,
+            handler: Arc::new(handler),
             cancel: CancellationToken::new(),
-        }
-    }
+        };
+        manager.spawn(info_span!("connection accept loop"), {
+            let endpoint = endpoint.clone();
+            let manager = manager.clone();
+            async move {
+                while let Some(incoming) = endpoint.accept().await {
+                    let conn = incoming.await?;
+                    manager.handle_incoming_connection(conn).await?;
+                }
+                anyhow::Ok(())
+            }
+        });
 
-    pub fn with_open_connection(
-        mut self,
-        open_connection: impl Fn(NodeId) -> BoxFuture<'static, anyhow::Result<Connection>>
-        + Send
-        + Sync
-        + 'static,
-    ) -> Self {
-        self.open_connection = Some(Arc::new(open_connection));
-        self
-    }
-
-    pub fn with_handle_connection(
-        mut self,
-        handle_connection: impl Fn(Connection) -> BoxFuture<'static, anyhow::Result<()>>
-        + Send
-        + Sync
-        + 'static,
-    ) -> Self {
-        self.handle_connection = Some(Arc::new(handle_connection));
-        self
+        manager
     }
 
     /// TODO docs
@@ -176,9 +175,10 @@ impl ConnectionManager {
             }
         }
 
-        if let Some(f) = self.handle_connection.as_ref() {
-            self.spawn(info_span!("handle_connection handler"), f(conn.clone()));
-        }
+        self.spawn(
+            info_span!("handler accept loop"),
+            self.handler.handle(conn.clone()),
+        );
 
         // Listen to the remote end closing the connection:
         self.spawn(info_span!("observe_closed"), {
@@ -283,18 +283,15 @@ impl ConnectionManager {
     }
 
     async fn open_connection(&self, remote_node_id: NodeId, alpn: &[u8]) -> Result<Connection> {
-        let conn = if let Some(f) = self.open_connection.as_ref() {
-            f(remote_node_id).await?
-        } else {
-            self.endpoint
-                .connect_with_opts(remote_node_id, alpn, ConnectOptions::new())
-                .await?
-                .await?
-        };
+        let conn = self
+            .handler
+            .open(self.endpoint.clone(), alpn.to_vec(), remote_node_id)
+            .await?;
 
-        if let Some(f) = self.handle_connection.as_ref() {
-            self.spawn(info_span!("open_connection handler"), f(conn.clone()));
-        }
+        self.spawn(
+            info_span!("open_connection handler"),
+            self.handler.handle(conn.clone()),
+        );
         Ok(conn)
     }
 

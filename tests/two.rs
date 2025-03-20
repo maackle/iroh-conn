@@ -1,12 +1,18 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use futures::{FutureExt, future};
+use futures::{
+    FutureExt,
+    future::{self, BoxFuture},
+};
 use iroh::{Endpoint, endpoint::Connection, protocol::Router};
-use iroh_conn::{ConnectionManager, testing::await_fully_connected};
+use iroh_conn::{ConnectionHandler, ConnectionManager, testing::await_fully_connected};
+use tokio::task::JoinHandle;
+
+const ALPN: &[u8] = b"iroh-conn-test";
 
 /// Artificial "processing time" delay for the echo handler
-const ECHO_DELAY: Duration = Duration::from_millis(0);
+const ECHO_DELAY: Duration = Duration::from_millis(100);
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_two() -> Result<()> {
@@ -27,13 +33,21 @@ async fn test_two() -> Result<()> {
     println!("2: {}", n2.endpoint().node_id().fmt_short());
 
     println!("\nCALL 1 -> 2\n");
-    n1.rpc(&n2, b"aloha").await?;
+    for _ in 0..2 {
+        n1.rpc(&n2, b"aloha").await?;
+        // n1.rpc_task(&n2, b"aloha").await??;
+    }
 
     println!("\nCALL 2 -> 1\n");
-    n2.rpc(&n1, b"buongiorno").await?;
+    for _ in 0..2 {
+        n2.rpc(&n1, b"buongiorno").await?;
+    }
 
     println!("\nSIMULTANEOUS 1 <-> 2\n");
-    let calls = [n1.rpc(&n2, b"hello from 1"), n2.rpc(&n1, b"hello from 2")];
+    let calls = [
+        n1.rpc_task(&n2, b"hello from 1"),
+        n2.rpc_task(&n1, b"hello from 2"),
+    ];
     let _result = future::join_all(calls)
         .await
         .into_iter()
@@ -42,50 +56,21 @@ async fn test_two() -> Result<()> {
     Ok(())
 }
 
-const ALPN: &[u8] = b"iroh-conn";
-
 #[derive(Clone, derive_more::Deref)]
 pub struct TestNode {
     #[deref]
     manager: ConnectionManager,
-    _router: Router,
 }
 
 impl TestNode {
     pub async fn new() -> Result<Self> {
-        let endpoint = Endpoint::builder().discovery_local_network().bind().await?;
-        let manager = ConnectionManager::new(endpoint.clone()).with_handle_connection(|conn| {
-            tracing::info!("spawning connection handler");
-            async move {
-                while let Ok((mut send, mut recv)) = conn.accept_bi().await {
-                    tracing::info!(send = ?send.id(), recv = ?recv.id(), "[accept] BEGIN");
-
-                    if !ECHO_DELAY.is_zero() {
-                        tokio::time::sleep(ECHO_DELAY).await;
-                        tracing::info!(send = ?send.id(), recv = ?recv.id(), "[accept] delay over");
-                    }
-
-                    let buf = recv.read_to_end(10_000).await?;
-                    tracing::info!("[accept] received msg {}", std::str::from_utf8(&buf)?);
-
-                    send.write_all(&buf).await?;
-                    tracing::info!("[accept] replied with msg {}", std::str::from_utf8(&buf)?);
-                    send.finish()?;
-                    tracing::info!("[accept] DONE");
-                }
-                tracing::info!("handler loop for conn {} closing", conn.stable_id());
-                Ok(())
-            }
-            .boxed()
-        });
-        let router = Router::builder(endpoint)
-            .accept(ALPN, manager.clone())
-            .spawn()
+        let endpoint = Endpoint::builder()
+            .alpns(vec![ALPN.to_vec()])
+            .discovery_local_network()
+            .bind()
             .await?;
-        Ok(Self {
-            manager,
-            _router: router,
-        })
+        let manager = ConnectionManager::new(endpoint.clone(), TestHandler);
+        Ok(Self { manager })
     }
 
     #[tracing::instrument(skip_all, fields(node = self.endpoint().node_id().fmt_short(), remote = n.endpoint().node_id().fmt_short()))]
@@ -110,5 +95,40 @@ impl TestNode {
         tracing::info!("[caller] DONE");
         assert_eq!(msg, &response);
         Ok(response)
+    }
+
+    pub async fn rpc_task(&self, n: &Self, msg: &[u8]) -> Result<Vec<u8>> {
+        let this = self.clone();
+        let n = n.clone();
+        let msg = msg.to_vec();
+        tokio::spawn(async move { this.rpc(&n, &msg).await }).await?
+    }
+}
+
+pub struct TestHandler;
+
+impl ConnectionHandler for TestHandler {
+    fn handle(&self, conn: Connection) -> BoxFuture<'static, Result<()>> {
+        async move {
+            while let Ok((mut send, mut recv)) = conn.accept_bi().await {
+                tracing::info!(send = ?send.id(), recv = ?recv.id(), "[accept] BEGIN");
+
+                if !ECHO_DELAY.is_zero() {
+                    tokio::time::sleep(ECHO_DELAY).await;
+                    tracing::info!(send = ?send.id(), recv = ?recv.id(), "[accept] delay over");
+                }
+
+                let buf = recv.read_to_end(10_000).await?;
+                tracing::info!("[accept] received msg {}", std::str::from_utf8(&buf)?);
+
+                send.write_all(&buf).await?;
+                tracing::info!("[accept] replied with msg {}", std::str::from_utf8(&buf)?);
+                send.finish()?;
+                tracing::info!("[accept] DONE");
+            }
+            tracing::info!("handler loop for conn {} closing", conn.stable_id());
+            Ok(())
+        }
+        .boxed()
     }
 }
