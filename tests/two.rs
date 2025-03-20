@@ -11,7 +11,7 @@ use iroh_conn::{ConnectionManager, testing::await_fully_connected};
 use tracing::Level;
 
 /// Artificial "processing time" delay for the echo handler
-const ECHO_DELAY: Duration = Duration::from_millis(1);
+const ECHO_DELAY: Duration = Duration::from_millis(0);
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_two() -> Result<()> {
@@ -28,6 +28,9 @@ async fn test_two() -> Result<()> {
     let n2 = TestNode::new().await?;
     await_fully_connected([n1.endpoint().clone(), n2.endpoint().clone()]).await;
 
+    println!("1: {}", n1.endpoint().node_id().fmt_short());
+    println!("2: {}", n2.endpoint().node_id().fmt_short());
+
     println!("\nCALL 1 -> 2\n");
     n1.rpc(&n2, b"aloha").await?;
 
@@ -35,7 +38,7 @@ async fn test_two() -> Result<()> {
     n2.rpc(&n1, b"buongiorno").await?;
 
     println!("\nSIMULTANEOUS 1 <-> 2\n");
-    let calls = [n1.rpc(&n2, b"hello"), n2.rpc(&n1, b"hello")];
+    let calls = [n1.rpc(&n2, b"hello from 1"), n2.rpc(&n1, b"hello from 2")];
     let _result = future::join_all(calls)
         .await
         .into_iter()
@@ -61,12 +64,17 @@ impl TestNode {
             async move {
                 while let Ok((mut send, mut recv)) = conn.accept_bi().await {
                     tracing::info!(send = ?send.id(), recv = ?recv.id(), "[accept] BEGIN");
-                    let bytes = tokio::io::copy(&mut recv, &mut send).await?;
-                    tracing::info!("[accept] {} bytes copied", bytes);
 
-                    tokio::time::sleep(ECHO_DELAY).await;
-                    tracing::info!(send = ?send.id(), recv = ?recv.id(), "[accept] delay over");
+                    if !ECHO_DELAY.is_zero() {
+                        tokio::time::sleep(ECHO_DELAY).await;
+                        tracing::info!(send = ?send.id(), recv = ?recv.id(), "[accept] delay over");
+                    }
 
+                    let buf = recv.read_to_end(10_000).await?;
+                    tracing::info!("[accept] received msg {}", std::str::from_utf8(&buf)?);
+
+                    send.write_all(&buf).await?;
+                    tracing::info!("[accept] replied with msg {}", std::str::from_utf8(&buf)?);
                     send.finish()?;
                     tracing::info!("[accept] DONE");
                 }
@@ -93,14 +101,14 @@ impl TestNode {
         Ok(conn)
     }
 
-    #[tracing::instrument(skip_all, fields(node = self.endpoint().node_id().fmt_short(), remote = n.endpoint().node_id().fmt_short()))]
+    // #[tracing::instrument(skip_all, fields(node = self.endpoint().node_id().fmt_short(), remote = n.endpoint().node_id().fmt_short()))]
     pub async fn rpc(&self, n: &Self, msg: &[u8]) -> Result<Vec<u8>> {
         tracing::info!("[caller] BEGIN");
         let conn = self.connect(n).await?;
         let (mut send, mut recv) = conn.open_bi().await?;
         tracing::debug!(send = ?send.id(), recv = ?recv.id(), "[caller]");
         send.write_all(msg).await?;
-        tracing::debug!("[caller] wrote data");
+        tracing::debug!("[caller] wrote data: {}", std::str::from_utf8(msg)?);
         send.finish()?;
         tracing::debug!("[caller] finished sending");
         let response = recv.read_to_end(10_000).await?;

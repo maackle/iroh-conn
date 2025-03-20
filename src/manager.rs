@@ -201,7 +201,7 @@ impl ConnectionManager {
     }
 
     /// TODO docs
-    #[tracing::instrument(skip_all, fields(node = self.endpoint().node_id().fmt_short(), remote = remote_addr.clone().into().node_id.fmt_short()))]
+    // #[tracing::instrument(skip_all, fields(node = self.endpoint().node_id().fmt_short(), remote = remote_addr.clone().into().node_id.fmt_short()))]
     pub async fn get_or_open_connection(
         &self,
         remote_addr: impl Into<NodeAddr> + Clone,
