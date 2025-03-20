@@ -32,10 +32,10 @@ pub async fn await_fully_connected(endpoints: impl IntoIterator<Item = &Endpoint
 }
 
 pub fn setup_tracing(directive: &str) {
-    tracing_subscriber::fmt::fmt()
+    let _ = tracing_subscriber::fmt::fmt()
         .with_file(true)
         .with_line_number(true)
         // .with_max_level(Level::DEBUG)
         .with_env_filter(tracing_subscriber::EnvFilter::try_new(directive).unwrap())
-        .init();
+        .try_init();
 }

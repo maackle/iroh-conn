@@ -90,6 +90,10 @@ pub struct EchoHandler;
 impl ConnectionHandler for EchoHandler {
     fn handle(&self, conn: Connection) -> BoxFuture<'static, Result<()>> {
         async move {
+            if conn.alpn() != Some(ALPN_ECHO.to_vec()) {
+                anyhow::bail!("expected ALPN {:?}, got {:?}", ALPN_ECHO, conn.alpn());
+            }
+
             while let Ok((mut send, mut recv)) = conn.accept_bi().await {
                 tracing::info!(send = ?send.id(), recv = ?recv.id(), "[accept] BEGIN");
 
