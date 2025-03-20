@@ -21,22 +21,27 @@ async fn trivial() -> Result<()> {
     println!("\nCALL 1 -> 2\n");
     e1.send(e2.node_id(), "aloha").await?;
 
-    println!("\nCALL 2 -> 1\n");
-    e2.send(e1.node_id(), "buongiorno").await?;
+    // println!("\nCALL 1 -> 2 again\n");
+    // e1.send(e2.node_id(), "buongiorno").await?;
 
-    // NOTE: this hangs up
+    println!("\nCALL 2 -> 1\n");
+    e2.send(e1.node_id(), "ciao").await?;
+
+    // println!("\nCALL 2 -> 1 again\n");
+    // e2.send(e1.node_id(), "dia dhuit").await?;
+
     println!("\nSIMULTANEOUS 1 <-> 2\n");
     join_all({
         [
             tokio::spawn({
                 let e1 = e1.clone();
                 let e2 = e2.clone();
-                async move { e1.send(e2.node_id(), "ciao").await }
+                async move { e1.send(e2.node_id(), "1->2").await }
             }),
             tokio::spawn({
                 let e1 = e1.clone();
                 let e2 = e2.clone();
-                async move { e2.send(e1.node_id(), "dia dhuit").await }
+                async move { e2.send(e1.node_id(), "2->1").await }
             }),
         ]
     })
@@ -84,21 +89,28 @@ impl Node {
 
     /// Send a message to the target node and assert that the response matches what was sent.
     pub async fn send(&self, target: NodeId, msg: &str) -> Result<()> {
+        // dbg!();
         let conn = self.connect(target).await?;
+        // dbg!();
 
         let (mut send, mut recv) = conn.open_bi().await?;
+        // dbg!();
 
         tracing::debug!(send = ?send.id(), recv = ?recv.id(), "[caller]");
+        // dbg!();
 
         send.write_all(msg.as_bytes()).await?;
+        // dbg!();
 
         tracing::debug!("[caller] wrote data: {}", msg);
 
         send.finish()?;
+        // dbg!();
 
         tracing::debug!("[caller] finished sending");
 
         let response = recv.read_to_end(10_000).await?;
+        // dbg!();
 
         tracing::info!("[caller] DONE");
 
@@ -144,23 +156,27 @@ impl OneConn {
         tokio::spawn({
             let conn = conn.clone();
             async move {
-                let (mut send, mut recv) = conn.accept_bi().await?;
+                while let Ok((mut send, mut recv)) = conn.accept_bi().await {
+                    // dbg!();
 
-                tracing::info!(send = ?send.id(), recv = ?recv.id(), "[accept] BEGIN");
+                    tracing::info!(send = ?send.id(), recv = ?recv.id(), "[accept] BEGIN");
 
-                let buf = recv.read_to_end(10_000).await?;
+                    let buf = recv.read_to_end(10_000).await?;
+                    // dbg!();
 
-                tracing::info!("[accept] received msg {}", std::str::from_utf8(&buf)?);
+                    tracing::info!("[accept] received msg {}", std::str::from_utf8(&buf)?);
 
-                tokio::time::sleep(ECHO_DELAY).await;
-                send.write_all(&buf).await?;
+                    tokio::time::sleep(ECHO_DELAY).await;
+                    send.write_all(&buf).await?;
+                    // dbg!();
 
-                tracing::info!("[accept] replied with msg {}", std::str::from_utf8(&buf)?);
+                    tracing::info!("[accept] replied with msg {}", std::str::from_utf8(&buf)?);
 
-                send.finish()?;
+                    send.finish()?;
+                    // dbg!();
 
-                tracing::info!("[accept] DONE");
-
+                    tracing::info!("[accept] DONE");
+                }
                 anyhow::Ok(())
             }
         });
