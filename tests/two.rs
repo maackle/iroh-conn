@@ -5,9 +5,11 @@ use futures::{
     FutureExt,
     future::{self, BoxFuture},
 };
-use iroh::{Endpoint, endpoint::Connection, protocol::Router};
-use iroh_conn::{ConnectionHandler, ConnectionManager, testing::await_fully_connected};
-use tokio::task::JoinHandle;
+use iroh::{Endpoint, endpoint::Connection};
+use iroh_conn::{
+    ConnectionHandler, ConnectionManager,
+    testing::{await_fully_connected, setup_tracing},
+};
 
 const ALPN: &[u8] = b"iroh-conn-test";
 
@@ -15,27 +17,37 @@ const ALPN: &[u8] = b"iroh-conn-test";
 const ECHO_DELAY: Duration = Duration::from_millis(100);
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_two() -> Result<()> {
-    tracing_subscriber::fmt::fmt()
-        .with_file(true)
-        .with_line_number(true)
-        // .with_max_level(Level::DEBUG)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_new("two=debug,iroh_conn=trace").unwrap(),
-        )
-        .init();
+async fn test_two_simultaneous() -> Result<()> {
+    setup_tracing("two=info,iroh_conn=info");
 
     let n1 = TestNode::new().await?;
     let n2 = TestNode::new().await?;
-    await_fully_connected([n1.endpoint().clone(), n2.endpoint().clone()]).await;
-
     println!("1: {}", n1.endpoint().node_id().fmt_short());
     println!("2: {}", n2.endpoint().node_id().fmt_short());
+    await_fully_connected([n1.endpoint().clone(), n2.endpoint().clone()]).await;
 
+    // First simultaneous call fails
+    TestNode::rpc_cycle([&n1, &n2], b"hello").await.unwrap_err();
+    // Second simultaneous call succeeds
+    TestNode::rpc_cycle([&n1, &n2], b"hi").await.unwrap();
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_two_simultaneous_warmed() -> Result<()> {
+    setup_tracing("two=info,iroh_conn=info");
+
+    let n1 = TestNode::new().await?;
+    let n2 = TestNode::new().await?;
+    println!("1: {}", n1.endpoint().node_id().fmt_short());
+    println!("2: {}", n2.endpoint().node_id().fmt_short());
+    await_fully_connected([n1.endpoint().clone(), n2.endpoint().clone()]).await;
+
+    // First "warm" the connections by having a clear opener and acceptor
     println!("\nCALL 1 -> 2\n");
     for _ in 0..2 {
         n1.rpc(&n2, b"aloha").await?;
-        // n1.rpc_task(&n2, b"aloha").await??;
     }
 
     println!("\nCALL 2 -> 1\n");
@@ -97,6 +109,27 @@ impl TestNode {
         Ok(response)
     }
 
+    pub async fn rpc_cycle(ns: impl IntoIterator<Item = &Self>, msg: &[u8]) -> Result<()> {
+        let ns = ns.into_iter().collect::<Vec<_>>();
+        let num = ns.len();
+        let mut calls = vec![];
+        for i in 0..num {
+            calls.push(ns[i].rpc(&ns[(i + 1) % num], msg));
+        }
+
+        let results = future::join_all(calls)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+
+        assert!(
+            results.iter().all(|r| r == msg),
+            "all results must match the original message"
+        );
+
+        Ok(())
+    }
+
     pub async fn rpc_task(&self, n: &Self, msg: &[u8]) -> Result<Vec<u8>> {
         let this = self.clone();
         let n = n.clone();
@@ -113,16 +146,14 @@ impl ConnectionHandler for TestHandler {
             while let Ok((mut send, mut recv)) = conn.accept_bi().await {
                 tracing::info!(send = ?send.id(), recv = ?recv.id(), "[accept] BEGIN");
 
-                if !ECHO_DELAY.is_zero() {
-                    tokio::time::sleep(ECHO_DELAY).await;
-                    tracing::info!(send = ?send.id(), recv = ?recv.id(), "[accept] delay over");
-                }
+                tokio::time::sleep(ECHO_DELAY).await;
 
                 let buf = recv.read_to_end(10_000).await?;
                 tracing::info!("[accept] received msg {}", std::str::from_utf8(&buf)?);
 
                 send.write_all(&buf).await?;
                 tracing::info!("[accept] replied with msg {}", std::str::from_utf8(&buf)?);
+
                 send.finish()?;
                 tracing::info!("[accept] DONE");
             }
