@@ -2,13 +2,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use futures::{FutureExt, future};
-use iroh::{
-    Endpoint,
-    endpoint::{Connecting, Connection},
-    protocol::{ProtocolHandler, Router},
-};
+use iroh::{Endpoint, endpoint::Connection, protocol::Router};
 use iroh_conn::{ConnectionManager, testing::await_fully_connected};
-use tracing::Level;
 
 /// Artificial "processing time" delay for the echo handler
 const ECHO_DELAY: Duration = Duration::from_millis(0);

@@ -24,11 +24,22 @@ async fn trivial() -> Result<()> {
     println!("\nCALL 2 -> 1\n");
     e2.send(e1.node_id(), "buongiorno").await?;
 
+    // NOTE: this hangs up
     println!("\nSIMULTANEOUS 1 <-> 2\n");
-    join_all([
-        e1.send(e2.node_id(), "aloha"),
-        e2.send(e1.node_id(), "buongiorno"),
-    ])
+    join_all({
+        [
+            tokio::spawn({
+                let e1 = e1.clone();
+                let e2 = e2.clone();
+                async move { e1.send(e2.node_id(), "ciao").await }
+            }),
+            tokio::spawn({
+                let e1 = e1.clone();
+                let e2 = e2.clone();
+                async move { e2.send(e1.node_id(), "dia dhuit").await }
+            }),
+        ]
+    })
     .await
     .into_iter()
     .collect::<Result<Vec<_>, _>>()?;
@@ -37,7 +48,7 @@ async fn trivial() -> Result<()> {
 }
 
 /// A node which can hold exactly zero or one connections.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Node {
     pub endpoint: Endpoint,
     pub conn: OneConn,
@@ -55,6 +66,7 @@ impl Node {
 
         let conn = OneConn::default();
 
+        // Connection accept loop
         tokio::spawn({
             let oneconn = conn.clone();
             let endpoint = endpoint.clone();
@@ -118,13 +130,16 @@ pub struct OneConn(Arc<Mutex<Option<Connection>>>);
 impl OneConn {
     /// Return the current connection, if any.
     pub async fn get(&self) -> Option<Connection> {
-        let lock = self.0.lock().await;
-        lock.clone()
+        self.0.lock().await.clone()
     }
 
     /// Set the current connection and spawn the echo protocol handler.
     pub async fn set(&self, conn: Connection) {
         let mut lock = self.0.lock().await;
+
+        if lock.is_some() {
+            panic!("connection already set");
+        }
 
         tokio::spawn({
             let conn = conn.clone();
@@ -137,10 +152,7 @@ impl OneConn {
 
                 tracing::info!("[accept] received msg {}", std::str::from_utf8(&buf)?);
 
-                if !ECHO_DELAY.is_zero() {
-                    tokio::time::sleep(ECHO_DELAY).await;
-                    tracing::info!(send = ?send.id(), recv = ?recv.id(), "[accept] delay over");
-                }
+                tokio::time::sleep(ECHO_DELAY).await;
                 send.write_all(&buf).await?;
 
                 tracing::info!("[accept] replied with msg {}", std::str::from_utf8(&buf)?);
