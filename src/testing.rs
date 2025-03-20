@@ -2,6 +2,9 @@ use std::{io::Write, time::Instant};
 
 use iroh::Endpoint;
 
+mod test_node;
+pub use test_node::*;
+
 pub async fn await_fully_connected(endpoints: impl IntoIterator<Item = &Endpoint>) {
     let start = Instant::now();
     print!("awaiting fully connected ");
