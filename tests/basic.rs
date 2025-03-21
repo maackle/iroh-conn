@@ -21,8 +21,11 @@ async fn test_two_simultaneous() -> Result<()> {
 
     let [n1, n2] = TestNode::cluster(EchoHandler, [ALPN_ECHO.to_vec()]).await?;
 
+    println!("\nfirst:\n");
     // First simultaneous call fails
     TestNode::rpc_cycle([&n1, &n2], b"hello").await.unwrap_err();
+
+    println!("\nsecond:\n");
     // Second simultaneous call succeeds
     TestNode::rpc_cycle([&n1, &n2], b"hi").await.unwrap();
 

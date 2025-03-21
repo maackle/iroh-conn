@@ -14,7 +14,10 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info_span};
 
-use crate::{Alpn, ConnectionManager};
+use crate::{
+    Alpn, ConnectionManager,
+    event::{Action, Event, Nid},
+};
 
 mod handler;
 pub use handler::ConnectionHandler;
@@ -70,6 +73,9 @@ impl ConnectionManager for BasicConnectionManager {
                 let conn = self.open_connection(remote_node_id, alpn).await?;
                 tracing::trace!(conn = conn.stable_id(), "opened connection");
                 spot.insert(conn.clone());
+
+                self.emit_event(Action::OpenConnection { to: remote_node_id });
+
                 tracing::debug!(
                     conn = conn.stable_id(),
                     "opened and registered new connection"
@@ -158,6 +164,10 @@ impl ConnectionManager for BasicConnectionManager {
             return Ok(());
         }
 
+        self.emit_event(Action::AcceptConnection {
+            from: remote_node_id,
+        });
+
         // If we had an open connection like this already, close it.
         if let Entry::Occupied(initiated_conn) =
             conns.initiated.entry((remote_node_id, alpn.clone()))
@@ -168,6 +178,7 @@ impl ConnectionManager for BasicConnectionManager {
                     &Self::CLOSE_CONNECTION_SUPERSEDED_MSG,
                 );
             }
+            self.emit_event(Action::CloseConnection { to: remote_node_id });
         }
 
         // Now that we have the connection we wish to use, spawn the handler for it
@@ -286,6 +297,11 @@ impl BasicConnectionManager {
             .get(alpn)
             .ok_or_else(|| anyhow::anyhow!("No handler registered for ALPN: {:?}", alpn))?
             .clone())
+    }
+
+    fn emit_event(&self, action: Action<NodeId>) {
+        let event: Event<Nid> = Event::new(self.endpoint.node_id(), action);
+        println!("<EVENT> {}", event);
     }
 
     fn spawn_task<F>(&self, span: tracing::Span, task: F)

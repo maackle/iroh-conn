@@ -1,6 +1,9 @@
 pub mod basic;
 mod manager;
 
+#[cfg(feature = "modeling")]
+pub mod event;
+
 #[cfg(feature = "testing")]
 pub mod testing;
 
