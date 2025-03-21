@@ -11,7 +11,7 @@ use anyhow::Result;
 use futures::future::BoxFuture;
 use iroh::{
     Endpoint, NodeAddr, NodeId,
-    endpoint::{ConnectOptions, Connecting, Connection},
+    endpoint::{ConnectOptions, Connection},
 };
 use n0_future::{FutureExt, task};
 use tokio::sync::Mutex;
@@ -362,18 +362,5 @@ impl ConnectionSet {
         alpn: Alpn,
     ) -> Entry<'_, (NodeId, Alpn), BTreeMap<usize, Connection>> {
         self.inner.entry((node_id, alpn))
-    }
-}
-
-impl iroh::protocol::ProtocolHandler for ConnectionManager {
-    fn accept(&self, connecting: Connecting) -> n0_future::future::Boxed<Result<()>> {
-        let manager = self.clone();
-        async move {
-            manager
-                .handle_incoming_connection(connecting.await?)
-                .await?;
-            Ok(())
-        }
-        .boxed()
     }
 }
