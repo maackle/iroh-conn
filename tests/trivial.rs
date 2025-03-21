@@ -64,7 +64,6 @@ impl Node {
     pub async fn spawn() -> Self {
         let endpoint = Endpoint::builder()
             .alpns(vec![ALPN.to_vec()])
-            .discovery_local_network()
             .bind()
             .await
             .unwrap();
