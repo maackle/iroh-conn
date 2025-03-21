@@ -18,7 +18,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info_span};
 
-use crate::event::Event;
+use crate::event::{Action, Event, Nid};
 
 pub trait ConnectionHandler: Send + Sync + 'static {
     fn handle(&self, conn: Connection) -> BoxFuture<'static, Result<()>>;
@@ -115,6 +115,10 @@ impl ConnectionManager {
             return Ok(());
         }
 
+        self.emit_event(Action::AcceptConnection {
+            from: remote_node_id,
+        });
+
         // If we had an open connection like this already, close it.
         if let Entry::Occupied(initiated_conn) =
             conns.initiated.entry((remote_node_id, alpn.clone()))
@@ -124,6 +128,7 @@ impl ConnectionManager {
                     Self::CLOSE_CONNECTION_SUPERSEDED_CODE.into(),
                     &Self::CLOSE_CONNECTION_SUPERSEDED_MSG,
                 );
+                self.emit_event(Action::CloseConnection { to: remote_node_id });
             }
         }
 
@@ -175,6 +180,7 @@ impl ConnectionManager {
             (Entry::Vacant(spot), Entry::Vacant(_)) => {
                 let conn = self.open_connection(remote_node_id, alpn).await?;
                 spot.insert(conn.clone());
+                self.emit_event(Action::OpenConnection { to: remote_node_id });
                 tracing::debug!(conn = conn.stable_id(), "opening new connection");
                 conn
             }
@@ -256,6 +262,11 @@ impl ConnectionManager {
         task::spawn(async move { token.run_until_cancelled(task).await }.instrument(span));
     }
 
+    fn emit_event(&self, action: Action<NodeId>) {
+        let event: Event<Nid> = Event::new(self.endpoint.node_id(), action);
+        println!("<EVENT> {}", event);
+    }
+
     fn prefer_initiated(&self, remote_node_id: NodeId) -> bool {
         let node_id = self.endpoint.node_id();
         let our_way = blake3::hash(&[*node_id.as_bytes(), *remote_node_id.as_bytes()].concat());
@@ -329,5 +340,3 @@ impl iroh::protocol::ProtocolHandler for ConnectionManager {
         .boxed()
     }
 }
-
-fn emit_event(event: Event) {}

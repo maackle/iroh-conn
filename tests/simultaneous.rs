@@ -16,12 +16,15 @@ const ECHO_DELAY: Duration = Duration::from_millis(100);
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_two_simultaneous() -> Result<()> {
-    setup_tracing("simultaneous=info,iroh_conn=info");
+    // setup_tracing("simultaneous=info,iroh_conn=info");
 
     let [n1, n2] = TestNode::cluster(EchoHandler, [ALPN_ECHO.to_vec()]).await?;
 
+    println!("\nfirst:\n");
     // First simultaneous call fails
     TestNode::rpc_cycle([&n1, &n2], b"hello").await.unwrap_err();
+
+    println!("\nsecond:\n");
     // Second simultaneous call succeeds
     TestNode::rpc_cycle([&n1, &n2], b"hi").await.unwrap();
 
@@ -40,7 +43,7 @@ async fn test_three_simultaneous() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_interweaved() -> Result<()> {
-    setup_tracing("simultaneous=info,iroh_conn=info");
+    // setup_tracing("simultaneous=info,iroh_conn=info");
 
     let [n1, n2, n3] = TestNode::cluster(EchoHandler, [ALPN_ECHO.to_vec()]).await?;
     join_all([
