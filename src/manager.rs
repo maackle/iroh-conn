@@ -53,7 +53,7 @@ pub struct ConnectionManager {
     connections: Arc<Mutex<Connections>>,
 
     #[debug(skip)]
-    handler: Arc<dyn ConnectionHandler>,
+    handlers: Arc<Mutex<BTreeMap<Alpn, Arc<dyn ConnectionHandler>>>>,
 
     // Handling subtask cancellation, aborted on drop
     cancel: CancellationToken,
@@ -68,14 +68,14 @@ impl ConnectionManager {
     const CLOSE_CONNECTION_SUPERSEDED_MSG: &[u8] = b"ConnectionManager: Connection superseded";
 
     /// TODO docs
-    pub fn new(endpoint: Endpoint, handler: impl ConnectionHandler) -> Self {
+    pub fn spawn(endpoint: Endpoint) -> Self {
         let manager = Self {
             endpoint: endpoint.clone(),
             connections: Default::default(),
-            handler: Arc::new(handler),
+            handlers: Default::default(),
             cancel: CancellationToken::new(),
         };
-        manager.spawn(info_span!("connection accept loop"), {
+        manager.spawn_task(info_span!("connection accept loop"), {
             let endpoint = endpoint.clone();
             let manager = manager.clone();
             async move {
@@ -90,6 +90,24 @@ impl ConnectionManager {
         manager
     }
 
+    pub async fn register_handler(
+        &self,
+        alpns: Vec<Alpn>,
+        handler: impl ConnectionHandler,
+    ) -> Result<()> {
+        let handler = Arc::new(handler);
+        let mut lock = self.handlers.lock().await;
+        for alpn in alpns.iter() {
+            if lock.contains_key(alpn) {
+                anyhow::bail!("ALPN already registered: {:?}", alpn);
+            }
+        }
+        for alpn in alpns {
+            lock.insert(alpn.clone(), handler.clone());
+        }
+        Ok(())
+    }
+
     /// TODO docs
     #[tracing::instrument(skip_all, fields(node = self.endpoint().node_id().fmt_short(), remote = conn.remote_node_id()?.fmt_short()))]
     pub async fn handle_incoming_connection(&self, conn: Connection) -> Result<()> {
@@ -99,6 +117,10 @@ impl ConnectionManager {
         let alpn = conn
             .alpn()
             .ok_or_else(|| anyhow::anyhow!("Not tracking connections without ALPNs"))?;
+
+        if !self.handlers.lock().await.contains_key(&alpn) {
+            anyhow::bail!("No handler registered for ALPN: {:?}", alpn);
+        }
 
         let mut conns = self.connections.lock().await;
         if let Err(_) = conns
@@ -125,13 +147,17 @@ impl ConnectionManager {
             }
         }
 
-        self.spawn(
-            info_span!("handler accept loop"),
-            self.handler.handle(conn.clone()),
-        );
+        // Now that we have the connection we wish to use, spawn the handler for it
+        {
+            let handler = self.get_handler(&alpn).await?;
+            self.spawn_task(
+                info_span!("handler accept loop"),
+                handler.handle(conn.clone()),
+            );
+        }
 
         // Listen to the remote end closing the connection:
-        self.spawn(info_span!("observe_closed"), {
+        self.spawn_task(info_span!("observe_closed"), {
             let conns = self.connections.clone();
             let alpn = alpn.clone();
             async move {
@@ -233,19 +259,29 @@ impl ConnectionManager {
     }
 
     async fn open_connection(&self, remote_node_id: NodeId, alpn: &[u8]) -> Result<Connection> {
-        let conn = self
-            .handler
+        let handler = self.get_handler(alpn).await?;
+        let conn = handler
             .open(self.endpoint.clone(), alpn.to_vec(), remote_node_id)
             .await?;
 
-        self.spawn(
+        self.spawn_task(
             info_span!("open_connection handler"),
-            self.handler.handle(conn.clone()),
+            handler.handle(conn.clone()),
         );
         Ok(conn)
     }
 
-    fn spawn<F>(&self, span: tracing::Span, task: F)
+    async fn get_handler(&self, alpn: &[u8]) -> Result<Arc<dyn ConnectionHandler>> {
+        Ok(self
+            .handlers
+            .lock()
+            .await
+            .get(alpn)
+            .ok_or_else(|| anyhow::anyhow!("No handler registered for ALPN: {:?}", alpn))?
+            .clone())
+    }
+
+    fn spawn_task<F>(&self, span: tracing::Span, task: F)
     where
         F: Future + Send + 'static,
         F::Output: Send + 'static,

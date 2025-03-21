@@ -16,12 +16,14 @@ impl TestNode {
         handler: impl ConnectionHandler,
         alpns: impl IntoIterator<Item = Vec<u8>>,
     ) -> Result<Self> {
+        let alpns = alpns.into_iter().collect::<Vec<_>>();
         let endpoint = Endpoint::builder()
-            .alpns(alpns.into_iter().collect())
+            .alpns(alpns.clone())
             .discovery_local_network()
             .bind()
             .await?;
-        let manager = ConnectionManager::new(endpoint.clone(), handler);
+        let manager = ConnectionManager::spawn(endpoint.clone());
+        manager.register_handler(alpns, handler).await?;
         Ok(Self { manager })
     }
 
