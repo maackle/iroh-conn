@@ -18,8 +18,6 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info_span};
 
-use crate::event::Event;
-
 pub trait ConnectionHandler: Send + Sync + 'static {
     fn handle(&self, conn: Connection) -> BoxFuture<'static, Result<()>>;
 
@@ -329,5 +327,3 @@ impl iroh::protocol::ProtocolHandler for ConnectionManager {
         .boxed()
     }
 }
-
-fn emit_event(event: Event) {}

@@ -1,7 +1,5 @@
 mod manager;
 
-pub mod event;
-
 #[cfg(feature = "testing")]
 pub mod testing;
 
