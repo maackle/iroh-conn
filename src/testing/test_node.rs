@@ -1,4 +1,4 @@
-use crate::{ConnectionHandler, ConnectionManager, testing::await_fully_connected};
+use crate::{ConnectionHandler, ConnectionManager, testing::discover};
 use anyhow::Result;
 use futures::future;
 use iroh::{Endpoint, endpoint::Connection};
@@ -17,11 +17,7 @@ impl TestNode {
         alpns: impl IntoIterator<Item = Vec<u8>>,
     ) -> Result<Self> {
         let alpns = alpns.into_iter().collect::<Vec<_>>();
-        let endpoint = Endpoint::builder()
-            .alpns(alpns.clone())
-            .discovery_local_network()
-            .bind()
-            .await?;
+        let endpoint = Endpoint::builder().alpns(alpns.clone()).bind().await?;
         let manager = ConnectionManager::spawn(endpoint.clone());
         manager.register_handler(alpns, handler).await?;
         Ok(Self { manager })
@@ -42,7 +38,9 @@ impl TestNode {
             .iter()
             .map(|n| n.manager.endpoint())
             .collect::<Vec<_>>();
-        await_fully_connected(endpoints).await;
+
+        discover(endpoints).await?;
+
         Ok(nodes.try_into().unwrap())
     }
 

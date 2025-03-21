@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use anyhow::Result;
 use futures::future::join_all;
 use iroh::{Endpoint, NodeId, endpoint::Connection};
-use iroh_conn::testing::{await_fully_connected, setup_tracing};
+use iroh_conn::testing::{discover, setup_tracing};
 use tokio::sync::Mutex;
 
 const ALPN: &[u8] = b"trivial";
@@ -16,7 +16,7 @@ async fn trivial() -> Result<()> {
     let e1 = Node::spawn().await;
     let e2 = Node::spawn().await;
 
-    await_fully_connected(vec![&e1.endpoint, &e2.endpoint]).await;
+    discover(vec![&e1.endpoint, &e2.endpoint]).await?;
 
     println!("\nCALL 1 -> 2\n");
     e1.send(e2.node_id(), "aloha").await?;

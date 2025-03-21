@@ -5,6 +5,18 @@ use iroh::Endpoint;
 mod test_node;
 pub use test_node::*;
 
+pub async fn discover(endpoints: impl IntoIterator<Item = &Endpoint>) -> anyhow::Result<()> {
+    let endpoints = endpoints.into_iter().collect::<Vec<_>>();
+    for i in endpoints.iter() {
+        for j in endpoints.iter() {
+            if i.node_id() != j.node_id() {
+                i.add_node_addr(j.node_addr().await?)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn await_fully_connected(endpoints: impl IntoIterator<Item = &Endpoint>) {
     let start = Instant::now();
     print!("awaiting fully connected ");
