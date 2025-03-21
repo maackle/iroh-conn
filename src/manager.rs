@@ -28,10 +28,13 @@ pub trait ConnectionHandler: Send + Sync + 'static {
         remote_node_id: NodeId,
     ) -> BoxFuture<'static, Result<Connection>> {
         async move {
-            let conn = endpoint
+            dbg!();
+            let connecting = endpoint
                 .connect_with_opts(remote_node_id, &alpn, ConnectOptions::new())
-                .await?
                 .await?;
+            dbg!();
+            let conn = connecting.await?;
+            dbg!();
             Ok(conn)
         }
         .boxed()
@@ -79,10 +82,13 @@ impl ConnectionManager {
             let endpoint = endpoint.clone();
             let manager = manager.clone();
             async move {
+                tracing::debug!("ConnectionManager accept loop started");
                 while let Some(incoming) = endpoint.accept().await {
+                    tracing::info!("ConnectionManager accepted connection");
                     let conn = incoming.await?;
                     manager.handle_incoming_connection(conn).await?;
                 }
+                tracing::warn!("ConnectionManager accept loop exited");
                 anyhow::Ok(())
             }
         });
@@ -186,7 +192,10 @@ impl ConnectionManager {
         let remote_addr = remote_addr.into();
         let remote_node_id = remote_addr.node_id;
 
+        dbg!();
         let mut conns = self.connections.lock().await;
+        dbg!();
+
         let Connections {
             initiated,
             accepted,
@@ -197,14 +206,16 @@ impl ConnectionManager {
         let conn = match (initiated_conn, accepted_conns) {
             // No connection open for this - need to open a new connection
             (Entry::Vacant(spot), Entry::Vacant(_)) => {
+                tracing::trace!("opening new connection...");
                 let conn = self.open_connection(remote_node_id, alpn).await?;
                 spot.insert(conn.clone());
-                tracing::debug!(conn = conn.stable_id(), "opening new connection");
+                tracing::debug!(conn = conn.stable_id(), "opened new connection");
                 conn
             }
 
             // We have accepted connections for this - re-use them.
             (Entry::Vacant(_), Entry::Occupied(accepted_conns)) => {
+                tracing::trace!("reusing accepted connection...");
                 let conn = accepted_conns
                     .get()
                     .values()
@@ -259,10 +270,13 @@ impl ConnectionManager {
     }
 
     async fn open_connection(&self, remote_node_id: NodeId, alpn: &[u8]) -> Result<Connection> {
+        dbg!();
         let handler = self.get_handler(alpn).await?;
+        dbg!();
         let conn = handler
             .open(self.endpoint.clone(), alpn.to_vec(), remote_node_id)
             .await?;
+        dbg!();
 
         self.spawn_task(
             info_span!("open_connection handler"),
