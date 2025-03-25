@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.97"
+async-trait = "*"
 blake3 = "1.7.0"
 derive_more = { version = "2.0.1", features = ["full"] }
 futures = "0.3.31"

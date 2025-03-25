@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{ConnectionHandler, ConnectionManager, testing::discover};
+use crate::{BasicConnectionManager, ConnectionHandler, ConnectionManager, testing::discover};
 use anyhow::Result;
 use futures::future;
 use iroh::{Endpoint, endpoint::Connection};
@@ -10,7 +10,7 @@ pub const ALPN_ECHO: &[u8] = b"test/echo";
 #[derive(Clone, Debug, derive_more::Deref)]
 pub struct TestNode {
     #[deref]
-    manager: Arc<ConnectionManager>,
+    manager: Arc<BasicConnectionManager>,
 }
 
 impl TestNode {
@@ -20,7 +20,7 @@ impl TestNode {
     ) -> Result<Self> {
         let alpns = alpns.into_iter().collect::<Vec<_>>();
         let endpoint = Endpoint::builder().alpns(alpns.clone()).bind().await?;
-        let manager = ConnectionManager::spawn(endpoint.clone());
+        let manager = BasicConnectionManager::spawn(endpoint.clone());
         manager.register_handler(alpns, handler).await?;
         Ok(Self { manager })
     }

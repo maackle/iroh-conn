@@ -1,9 +1,11 @@
+mod basic;
 mod manager;
 
 pub mod handler;
 #[cfg(feature = "testing")]
 pub mod testing;
 
+pub use basic::BasicConnectionManager;
 pub use handler::ConnectionHandler;
 pub use manager::ConnectionManager;
 

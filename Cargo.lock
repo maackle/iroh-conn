@@ -1583,6 +1583,7 @@ name = "iroh-conn"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "blake3",
  "derive_more 2.0.1",
  "futures",

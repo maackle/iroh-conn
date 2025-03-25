@@ -7,9 +7,17 @@ use iroh::{
 };
 use n0_future::FutureExt;
 
+/// The ConnectionHandler trait describes how to open connections,
+/// and what to do with connections once they are established.
 pub trait ConnectionHandler: Send + Sync + 'static {
+    /// Do something with a newly established connection.
+    ///
+    /// This is where your protocol's listening logic goes.
     fn handle(&self, conn: Connection) -> BoxFuture<'static, Result<()>>;
 
+    /// Open a connection to a remote node.
+    ///
+    /// This may be overridden to provide custom connection logic.
     fn open(
         &self,
         endpoint: Endpoint,
