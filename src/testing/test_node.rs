@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{ConnectionHandler, ConnectionManager, testing::discover};
 use anyhow::Result;
 use futures::future;
@@ -8,7 +10,7 @@ pub const ALPN_ECHO: &[u8] = b"test/echo";
 #[derive(Clone, Debug, derive_more::Deref)]
 pub struct TestNode {
     #[deref]
-    manager: ConnectionManager,
+    manager: Arc<ConnectionManager>,
 }
 
 impl TestNode {

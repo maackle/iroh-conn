@@ -2,9 +2,6 @@ use std::{io::Write, time::Instant};
 
 use iroh::Endpoint;
 
-mod test_node;
-pub use test_node::*;
-
 pub async fn discover(endpoints: impl IntoIterator<Item = &Endpoint>) -> anyhow::Result<()> {
     let endpoints = endpoints.into_iter().collect::<Vec<_>>();
     for i in endpoints.iter() {

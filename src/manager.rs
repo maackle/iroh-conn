@@ -8,38 +8,13 @@ use std::{
 };
 
 use anyhow::Result;
-use futures::future::BoxFuture;
-use iroh::{
-    Endpoint, NodeAddr, NodeId,
-    endpoint::{ConnectOptions, Connection},
-};
-use n0_future::{FutureExt, task};
+use iroh::{Endpoint, NodeAddr, NodeId, endpoint::Connection};
+use n0_future::task;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info_span};
 
-pub trait ConnectionHandler: Send + Sync + 'static {
-    fn handle(&self, conn: Connection) -> BoxFuture<'static, Result<()>>;
-
-    fn open(
-        &self,
-        endpoint: Endpoint,
-        alpn: Alpn,
-        remote_node_id: NodeId,
-    ) -> BoxFuture<'static, Result<Connection>> {
-        async move {
-            dbg!();
-            let connecting = endpoint
-                .connect_with_opts(remote_node_id, &alpn, ConnectOptions::new())
-                .await?;
-            dbg!();
-            let conn = connecting.await?;
-            dbg!();
-            Ok(conn)
-        }
-        .boxed()
-    }
-}
+use crate::{Alpn, ConnectionHandler};
 
 /// A connection manager.
 ///
@@ -50,7 +25,7 @@ pub trait ConnectionHandler: Send + Sync + 'static {
 ///
 /// Unfortunately, it can't deduplicate connections to only a single one,
 /// as we need to rely on the remote end to close redundant connections.
-#[derive(Clone, derive_more::Debug)]
+#[derive(derive_more::Debug)]
 pub struct ConnectionManager {
     endpoint: Endpoint,
     connections: Arc<Mutex<Connections>>,
@@ -71,18 +46,23 @@ impl ConnectionManager {
     const CLOSE_CONNECTION_SUPERSEDED_MSG: &[u8] = b"ConnectionManager: Connection superseded";
 
     /// TODO docs
-    pub fn spawn(endpoint: Endpoint) -> Self {
-        let manager = Self {
+    pub fn spawn(endpoint: Endpoint) -> Arc<Self> {
+        let manager = Arc::new(Self {
             endpoint: endpoint.clone(),
             connections: Default::default(),
             handlers: Default::default(),
             cancel: CancellationToken::new(),
-        };
-        manager.spawn_task(info_span!("connection accept loop"), {
+        });
+
+        manager.spawn_task(info_span!("connection-accept-loop"), {
             let endpoint = endpoint.clone();
             let manager = manager.clone();
             async move {
-                tracing::debug!("ConnectionManager accept loop started");
+                tracing::debug!(
+                    me = endpoint.node_id().fmt_short(),
+                    "ConnectionManager accept loop started"
+                );
+
                 while let Some(incoming) = endpoint.accept().await {
                     tracing::info!("ConnectionManager accepted connection");
                     let conn = incoming.await?;
@@ -108,9 +88,10 @@ impl ConnectionManager {
                 anyhow::bail!("ALPN already registered: {:?}", alpn);
             }
         }
-        for alpn in alpns {
-            lock.insert(alpn.clone(), handler.clone());
+        for alpn in alpns.clone() {
+            lock.insert(alpn, handler.clone());
         }
+        tracing::info!("Registered handler for ALPNs: {:?}", alpns);
         Ok(())
     }
 
@@ -192,9 +173,7 @@ impl ConnectionManager {
         let remote_addr = remote_addr.into();
         let remote_node_id = remote_addr.node_id;
 
-        dbg!();
         let mut conns = self.connections.lock().await;
-        dbg!();
 
         let Connections {
             initiated,
@@ -206,10 +185,18 @@ impl ConnectionManager {
         let conn = match (initiated_conn, accepted_conns) {
             // No connection open for this - need to open a new connection
             (Entry::Vacant(spot), Entry::Vacant(_)) => {
-                tracing::trace!("opening new connection...");
+                tracing::trace!(
+                    "opening new connection... {} -> {}",
+                    self.endpoint.node_id(),
+                    remote_node_id
+                );
                 let conn = self.open_connection(remote_node_id, alpn).await?;
+                tracing::trace!(conn = conn.stable_id(), "opened connection");
                 spot.insert(conn.clone());
-                tracing::debug!(conn = conn.stable_id(), "opened new connection");
+                tracing::debug!(
+                    conn = conn.stable_id(),
+                    "opened and registered new connection"
+                );
                 conn
             }
 
@@ -273,8 +260,15 @@ impl ConnectionManager {
         dbg!();
         let handler = self.get_handler(alpn).await?;
         dbg!();
+        tracing::trace!(
+            "using handler to open connection {} -> {}, alpn={:?}",
+            self.endpoint.node_id(),
+            remote_node_id,
+            alpn
+        );
+        // let conn = self.endpoint.connect(remote_node_id, &alpn).await?;
         let conn = handler
-            .open(self.endpoint.clone(), alpn.to_vec(), remote_node_id)
+            .open(self.endpoint.clone(), remote_node_id, alpn.to_vec())
             .await?;
         dbg!();
 
@@ -335,8 +329,6 @@ struct Connections {
 struct ConnectionSet {
     inner: BTreeMap<(NodeId, Alpn), BTreeMap<usize, Connection>>,
 }
-
-type Alpn = Vec<u8>;
 
 impl ConnectionSet {
     pub fn insert(&mut self, node_id: NodeId, alpn: Alpn, conn: Connection) -> Result<()> {
