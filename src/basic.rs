@@ -130,8 +130,6 @@ impl ConnectionManager for BasicConnectionManager {
         Ok(conn)
     }
 
-    /// TODO docs
-    #[tracing::instrument(skip_all, fields(node = self.endpoint().node_id().fmt_short(), remote = conn.remote_node_id()?.fmt_short()))]
     async fn handle_incoming_connection(&self, conn: Connection) -> Result<()> {
         tracing::debug!(conn = conn.stable_id(), "handling incoming connection");
         let remote_node_id = conn.remote_node_id()?;

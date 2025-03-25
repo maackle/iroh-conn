@@ -1,17 +1,23 @@
+//! Test of the simplest possible connection manager, which can only ever
+//! manage a single connection.
+
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
 use futures::future::join_all;
-use iroh::{Endpoint, NodeId, endpoint::Connection};
-use iroh_conn::testing::{discover, setup_tracing};
+use iroh::{Endpoint, NodeAddr, NodeId, endpoint::Connection};
+use iroh_conn::{
+    ConnectionManager,
+    testing::{discover, setup_tracing},
+};
 use tokio::sync::Mutex;
 
-const ALPN: &[u8] = b"trivial";
+const ALPN: &[u8] = b"one_connection";
 const ECHO_DELAY: Duration = Duration::from_millis(100);
 
 #[tokio::test(flavor = "multi_thread")]
-async fn trivial() -> Result<()> {
-    setup_tracing("off,trivial=info");
+async fn one_connection() -> Result<()> {
+    setup_tracing("off,one_connection=info");
 
     let e1 = Node::spawn().await;
     let e2 = Node::spawn().await;
@@ -77,7 +83,7 @@ impl Node {
             async move {
                 while let Some(incoming) = endpoint.accept().await {
                     let conn = incoming.await?;
-                    oneconn.set(conn).await;
+                    oneconn.handle_incoming_connection(conn).await?;
                 }
                 anyhow::Ok(())
             }
@@ -88,28 +94,21 @@ impl Node {
 
     /// Send a message to the target node and assert that the response matches what was sent.
     pub async fn send(&self, target: NodeId, msg: &str) -> Result<()> {
-        // dbg!();
         let conn = self.connect(target).await?;
-        // dbg!();
 
         let (mut send, mut recv) = conn.open_bi().await?;
-        // dbg!();
 
         tracing::debug!(send = ?send.id(), recv = ?recv.id(), "[caller]");
-        // dbg!();
 
         send.write_all(msg.as_bytes()).await?;
-        // dbg!();
 
         tracing::debug!("[caller] wrote data: {}", msg);
 
         send.finish()?;
-        // dbg!();
 
         tracing::debug!("[caller] finished sending");
 
         let response = recv.read_to_end(10_000).await?;
-        // dbg!();
 
         tracing::info!("[caller] DONE");
 
@@ -123,7 +122,7 @@ impl Node {
             Some(conn) => Ok(conn),
             None => {
                 let conn = self.endpoint.connect(target, ALPN).await?;
-                self.conn.set(conn.clone()).await;
+                self.conn.handle_incoming_connection(conn.clone()).await?;
                 Ok(conn)
             }
         }
@@ -139,13 +138,27 @@ impl Node {
 pub struct OneConn(Arc<Mutex<Option<Connection>>>);
 
 impl OneConn {
-    /// Return the current connection, if any.
     pub async fn get(&self) -> Option<Connection> {
         self.0.lock().await.clone()
     }
+}
+
+#[async_trait::async_trait]
+impl ConnectionManager for OneConn {
+    /// Return the current connection, if any.
+    async fn get_or_open_connection(
+        &self,
+        _remote_addr: impl Into<NodeAddr> + Clone + Send,
+        _alpn: &[u8],
+    ) -> Result<Connection> {
+        Ok(self
+            .get()
+            .await
+            .expect("this test requires a connection to be set already"))
+    }
 
     /// Set the current connection and spawn the echo protocol handler.
-    pub async fn set(&self, conn: Connection) {
+    async fn handle_incoming_connection(&self, conn: Connection) -> Result<()> {
         let mut lock = self.0.lock().await;
 
         if lock.is_some() {
@@ -156,23 +169,18 @@ impl OneConn {
             let conn = conn.clone();
             async move {
                 while let Ok((mut send, mut recv)) = conn.accept_bi().await {
-                    // dbg!();
-
                     tracing::info!(send = ?send.id(), recv = ?recv.id(), "[accept] BEGIN");
 
                     let buf = recv.read_to_end(10_000).await?;
-                    // dbg!();
 
                     tracing::info!("[accept] received msg {}", std::str::from_utf8(&buf)?);
 
                     tokio::time::sleep(ECHO_DELAY).await;
                     send.write_all(&buf).await?;
-                    // dbg!();
 
                     tracing::info!("[accept] replied with msg {}", std::str::from_utf8(&buf)?);
 
                     send.finish()?;
-                    // dbg!();
 
                     tracing::info!("[accept] DONE");
                 }
@@ -181,5 +189,6 @@ impl OneConn {
         });
 
         *lock = Some(conn);
+        Ok(())
     }
 }

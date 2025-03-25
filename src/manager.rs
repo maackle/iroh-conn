@@ -1,12 +1,6 @@
 //! A connection manager to ensure roughly one open connection between peers,
 //! if possible.
 
-use std::{
-    collections::{BTreeMap, btree_map::Entry},
-    future::Future,
-    sync::Arc,
-};
-
 use anyhow::Result;
 use iroh::{NodeAddr, endpoint::Connection};
 

@@ -15,22 +15,24 @@ pub trait ConnectionHandler: Send + Sync + 'static {
     /// This is where your protocol's listening logic goes.
     fn handle(&self, conn: Connection) -> BoxFuture<'static, Result<()>>;
 
+    /// Specify the connection options to use when opening a connection.
+    fn connect_options(&self) -> ConnectOptions {
+        ConnectOptions::default()
+    }
+
     /// Open a connection to a remote node.
     ///
-    /// This may be overridden to provide custom connection logic.
+    /// This may be overridden to provide custom connection logic beyond
+    /// specifying the connection options.
     fn open(
         &self,
         endpoint: Endpoint,
         remote_node_id: NodeId,
         alpn: Alpn,
     ) -> BoxFuture<'static, Result<Connection>> {
+        let opts = self.connect_options();
         async move {
             // TODO: 5s is too low
-            let opts = ConnectOptions::new().with_transport_config({
-                let mut cfg = TransportConfig::default();
-                cfg.max_idle_timeout(Some(VarInt::from_u32(10_000).into()));
-                cfg.into()
-            });
             let connecting = endpoint
                 .connect_with_opts(remote_node_id, &alpn, opts)
                 .await?;

@@ -36,6 +36,7 @@ impl TestNode {
         .await
         .into_iter()
         .collect::<Result<Vec<_>>>()?;
+
         let endpoints = nodes
             .iter()
             .map(|n| n.manager.endpoint())
@@ -54,7 +55,7 @@ impl TestNode {
         Ok(conn)
     }
 
-    // #[tracing::instrument(skip_all, fields(node = self.endpoint().node_id().fmt_short(), remote = n.endpoint().node_id().fmt_short()))]
+    /// Make a single RPC to the given node
     pub async fn rpc(&self, n: &Self, msg: &[u8]) -> Result<Vec<u8>> {
         tracing::info!("[caller] BEGIN");
         let conn = self.connect(n, ALPN_ECHO).await?;
@@ -70,6 +71,8 @@ impl TestNode {
         Ok(response)
     }
 
+    /// Given a list of nodes, have each node simultaneously make an RPC to the
+    /// next node in the list in a circular manner.
     pub async fn rpc_cycle(ns: impl IntoIterator<Item = &Self>, msg: &[u8]) -> Result<()> {
         let ns = ns.into_iter().collect::<Vec<_>>();
         let num = ns.len();
@@ -89,12 +92,5 @@ impl TestNode {
         );
 
         Ok(())
-    }
-
-    pub async fn rpc_task(&self, n: &Self, msg: &[u8]) -> Result<Vec<u8>> {
-        let this = self.clone();
-        let n = n.clone();
-        let msg = msg.to_vec();
-        tokio::spawn(async move { this.rpc(&n, &msg).await }).await?
     }
 }

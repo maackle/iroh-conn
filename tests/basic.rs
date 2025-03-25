@@ -5,14 +5,14 @@ use futures::{
     FutureExt,
     future::{self, BoxFuture, join_all},
 };
-use iroh::endpoint::Connection;
+use iroh::endpoint::{ConnectOptions, Connection, TransportConfig, VarInt};
 use iroh_conn::{
     ConnectionHandler,
     testing::{ALPN_ECHO, TestNode, setup_tracing},
 };
 
 const TRACING_DIRECTIVE: &str = "off";
-// const TRACING_DIRECTIVE: &str = "simultaneous=info,iroh_conn=info";
+// const TRACING_DIRECTIVE: &str = "basic=info,iroh_conn=info";
 
 /// Artificial "processing time" delay for the echo handler
 const ECHO_DELAY: Duration = Duration::from_millis(100);
@@ -42,11 +42,11 @@ async fn test_three_simultaneous() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "this locks up, TODO fix"]
 async fn test_interweaved() -> Result<()> {
     setup_tracing(TRACING_DIRECTIVE);
 
     let [n1, n2, n3] = TestNode::cluster(EchoHandler, [ALPN_ECHO.to_vec()]).await?;
+
     join_all([
         TestNode::rpc_cycle([&n1, &n2], b"hello"),
         TestNode::rpc_cycle([&n2, &n3], b"hello"),
@@ -55,6 +55,7 @@ async fn test_interweaved() -> Result<()> {
     .await
     .into_iter()
     .collect::<Result<Vec<_>>>()?;
+
     Ok(())
 }
 
@@ -76,10 +77,7 @@ async fn test_two_simultaneous_warmed() -> Result<()> {
     }
 
     println!("\nSIMULTANEOUS 1 <-> 2\n");
-    let calls = [
-        n1.rpc_task(&n2, b"hello from 1"),
-        n2.rpc_task(&n1, b"hello from 2"),
-    ];
+    let calls = [n1.rpc(&n2, b"hello from 1"), n2.rpc(&n1, b"hello from 2")];
     let _result = future::join_all(calls)
         .await
         .into_iter()
@@ -92,6 +90,14 @@ async fn test_two_simultaneous_warmed() -> Result<()> {
 pub struct EchoHandler;
 
 impl ConnectionHandler for EchoHandler {
+    fn connect_options(&self) -> ConnectOptions {
+        ConnectOptions::new().with_transport_config({
+            let mut cfg = TransportConfig::default();
+            cfg.max_idle_timeout(Some(VarInt::from_u32(3_000).into()));
+            cfg.into()
+        })
+    }
+
     fn handle(&self, conn: Connection) -> BoxFuture<'static, Result<()>> {
         async move {
             if conn.alpn() != Some(ALPN_ECHO.to_vec()) {
