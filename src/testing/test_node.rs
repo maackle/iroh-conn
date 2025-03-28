@@ -3,10 +3,11 @@ use std::sync::Arc;
 use crate::{
     ConnectionManager,
     basic::{BasicConnectionManager, ConnectionHandler},
+    event::{EventMappingShared, EventType},
     testing::discover,
 };
 use anyhow::Result;
-use futures::future;
+use futures::{FutureExt, future};
 use iroh::{Endpoint, endpoint::Connection};
 
 pub const ALPN_ECHO: &[u8] = b"test/echo";
@@ -21,10 +22,11 @@ impl TestNode {
     pub async fn new(
         handler: impl ConnectionHandler,
         alpns: impl IntoIterator<Item = Vec<u8>>,
+        mapping: EventMappingShared,
     ) -> Result<Self> {
         let alpns = alpns.into_iter().collect::<Vec<_>>();
         let endpoint = Endpoint::builder().alpns(alpns.clone()).bind().await?;
-        let manager = BasicConnectionManager::spawn(endpoint.clone());
+        let manager = BasicConnectionManager::spawn(endpoint.clone(), mapping);
         manager.register_handler(alpns, handler).await?;
         Ok(Self { manager })
     }
@@ -32,10 +34,14 @@ impl TestNode {
     pub async fn cluster<const N: usize>(
         handler: impl ConnectionHandler + Clone,
         alpns: impl IntoIterator<Item = Vec<u8>>,
+        mapping: EventMappingShared,
     ) -> Result<[Self; N]> {
         let alpns = alpns.into_iter().collect::<Vec<_>>();
         let nodes = future::join_all(
-            std::iter::repeat_with(|| TestNode::new(handler.clone(), alpns.clone())).take(N),
+            std::iter::repeat_with(|| {
+                TestNode::new(handler.clone(), alpns.clone(), mapping.clone())
+            })
+            .take(N),
         )
         .await
         .into_iter()
@@ -61,9 +67,23 @@ impl TestNode {
 
     /// Make a single RPC to the given node
     pub async fn rpc(&self, n: &Self, msg: &[u8]) -> Result<Vec<u8>> {
-        tracing::info!("[caller] BEGIN");
+        tracing::info!(
+            "[caller] BEGIN {} -> {}",
+            self.endpoint().node_id().fmt_short(),
+            n.endpoint().node_id().fmt_short()
+        );
         let conn = self.connect(n, ALPN_ECHO).await?;
         let (mut send, mut recv) = conn.open_bi().await?;
+        self.manager
+            .emit_event(
+                EventType::OpenStream {
+                    to: n.endpoint().node_id(),
+                    conn: conn.stable_id(),
+                },
+                None,
+            )
+            .await;
+
         tracing::debug!(send = ?send.id(), recv = ?recv.id(), "[caller]");
         send.write_all(msg).await?;
         tracing::debug!("[caller] wrote data: {}", std::str::from_utf8(msg)?);
@@ -72,6 +92,17 @@ impl TestNode {
         let response = recv.read_to_end(10_000).await?;
         tracing::info!("[caller] DONE");
         assert_eq!(msg, &response);
+
+        self.manager
+            .emit_event(
+                EventType::EndStream {
+                    to: n.endpoint().node_id(),
+                    conn: conn.stable_id(),
+                },
+                None,
+            )
+            .await;
+
         Ok(response)
     }
 
@@ -82,7 +113,16 @@ impl TestNode {
         let num = ns.len();
         let mut calls = vec![];
         for i in 0..num {
-            calls.push(ns[i].rpc(&ns[(i + 1) % num], msg));
+            let j = (i + 1) % num;
+            let n = ns[i].clone();
+            let m = ns[j].clone();
+            let epn = n.manager.endpoint().node_id().fmt_short();
+            let epm = m.manager.endpoint().node_id().fmt_short();
+            calls.push(async move {
+                n.rpc(&m, msg).await.map_err(move |e| {
+                    anyhow::anyhow!("rpc_cycle error: {e}, {i} ({epn}) -> {j} ({epm})")
+                })
+            });
         }
 
         let results = future::join_all(calls)

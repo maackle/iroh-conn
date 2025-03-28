@@ -13,7 +13,7 @@ pub trait ConnectionHandler: Send + Sync + 'static {
     /// Do something with a newly established connection.
     ///
     /// This is where your protocol's listening logic goes.
-    fn handle(&self, conn: Connection) -> BoxFuture<'static, Result<()>>;
+    fn handle(&self, node_id: NodeId, conn: Connection) -> BoxFuture<'static, Result<()>>;
 
     /// Specify the connection options to use when opening a connection.
     fn connect_options(&self) -> ConnectOptions {
@@ -46,7 +46,7 @@ pub trait ConnectionHandler: Send + Sync + 'static {
 }
 
 impl ConnectionHandler for () {
-    fn handle(&self, _: Connection) -> BoxFuture<'static, Result<()>> {
+    fn handle(&self, _: NodeId, _: Connection) -> BoxFuture<'static, Result<()>> {
         async move { Ok(()) }.boxed()
     }
 }

@@ -3,6 +3,7 @@
 
 use std::{
     collections::{BTreeMap, btree_map::Entry},
+    fmt::Debug,
     future::Future,
     sync::Arc,
 };
@@ -16,7 +17,7 @@ use tracing::{Instrument, info_span};
 
 use crate::{
     Alpn, ConnectionManager,
-    event::{Action, Event, Nid},
+    event::{Event, EventMappingShared, EventType},
 };
 
 mod handler;
@@ -40,7 +41,12 @@ pub struct BasicConnectionManager {
     handlers: Mutex<BTreeMap<Alpn, Arc<dyn ConnectionHandler>>>,
 
     // Handling subtask cancellation, aborted on drop
+    #[debug(skip)]
     cancel: CancellationToken,
+
+    #[cfg(feature = "modeling")]
+    #[debug(skip)]
+    events: EventMappingShared,
 }
 
 #[async_trait::async_trait]
@@ -74,7 +80,14 @@ impl ConnectionManager for BasicConnectionManager {
                 tracing::trace!(conn = conn.stable_id(), "opened connection");
                 spot.insert(conn.clone());
 
-                self.emit_event(Action::OpenConnection { to: remote_node_id });
+                self.emit_event(
+                    EventType::OpenConnection {
+                        to: remote_node_id,
+                        conn: conn.stable_id(),
+                    },
+                    Some(&conns),
+                )
+                .await;
 
                 tracing::debug!(
                     conn = conn.stable_id(),
@@ -164,9 +177,14 @@ impl ConnectionManager for BasicConnectionManager {
             return Ok(());
         }
 
-        self.emit_event(Action::AcceptConnection {
-            from: remote_node_id,
-        });
+        self.emit_event(
+            EventType::AcceptConnection {
+                from: remote_node_id,
+                conn: conn.stable_id(),
+            },
+            Some(&conns),
+        )
+        .await;
 
         // If we had an open connection like this already, close it.
         if let Entry::Occupied(initiated_conn) =
@@ -178,7 +196,14 @@ impl ConnectionManager for BasicConnectionManager {
                     &Self::CLOSE_CONNECTION_SUPERSEDED_MSG,
                 );
             }
-            self.emit_event(Action::CloseConnection { to: remote_node_id });
+            self.emit_event(
+                EventType::CloseConnection {
+                    to: remote_node_id,
+                    conn: conn.stable_id(),
+                },
+                Some(&conns),
+            )
+            .await;
         }
 
         // Now that we have the connection we wish to use, spawn the handler for it
@@ -186,7 +211,7 @@ impl ConnectionManager for BasicConnectionManager {
             let handler = self.get_handler(&alpn).await?;
             self.spawn_task(
                 info_span!("handler accept loop"),
-                handler.handle(conn.clone()),
+                handler.handle(self.endpoint().node_id(), conn.clone()),
             );
         }
 
@@ -220,12 +245,13 @@ impl BasicConnectionManager {
     const CLOSE_CONNECTION_SUPERSEDED_MSG: &[u8] = b"ConnectionManager: Connection superseded";
 
     /// TODO docs
-    pub fn spawn(endpoint: Endpoint) -> Arc<Self> {
+    pub fn spawn(endpoint: Endpoint, events: EventMappingShared) -> Arc<Self> {
         let manager = Arc::new(Self {
             endpoint: endpoint.clone(),
             connections: Default::default(),
             handlers: Default::default(),
             cancel: CancellationToken::new(),
+            events,
         });
 
         manager.spawn_task(info_span!("connection-accept-loop"), {
@@ -249,6 +275,11 @@ impl BasicConnectionManager {
 
         manager
     }
+
+    // pub fn with_event_mapping(mut self, mapper: EventMappingShared) -> Self {
+    //     self.events = Some(mapper);
+    //     self
+    // }
 
     pub async fn register_handler(
         &self,
@@ -284,7 +315,7 @@ impl BasicConnectionManager {
 
         self.spawn_task(
             info_span!("open_connection handler"),
-            handler.handle(conn.clone()),
+            handler.handle(self.endpoint().node_id(), conn.clone()),
         );
         Ok(conn)
     }
@@ -299,9 +330,16 @@ impl BasicConnectionManager {
             .clone())
     }
 
-    fn emit_event(&self, action: Action<NodeId>) {
-        let event: Event<Nid> = Event::new(self.endpoint.node_id(), action);
-        println!("<EVENT> {}", event);
+    pub async fn emit_event(
+        &self,
+        event_type: EventType<NodeId, usize>,
+        conns: Option<&Connections>,
+    ) {
+        if let Some(events) = &self.events {
+            let mut lock = events.lock().await;
+            let event = Event::new(self.endpoint.node_id(), event_type);
+            crate::event::emit_event(event, self.endpoint().node_id(), &mut lock, conns)
+        }
     }
 
     fn spawn_task<F>(&self, span: tracing::Span, task: F)
@@ -335,14 +373,36 @@ impl Drop for BasicConnectionManager {
 // Private
 
 #[derive(Debug, Default)]
-struct Connections {
-    initiated: BTreeMap<(NodeId, Alpn), Connection>,
-    accepted: ConnectionSet,
+pub struct Connections {
+    pub initiated: BTreeMap<(NodeId, Alpn), Connection>,
+    pub accepted: ConnectionSet,
 }
 
+// impl Debug for Connections {
+//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//         let initiated = self
+//             .initiated
+//             .iter()
+//             .map(|((k, _), _)| k)
+//             .collect::<Vec<_>>();
+
+//         let accepted = self
+//             .accepted
+//             .inner
+//             .iter()
+//             .map(|((k, _), v)| (k, v.len()))
+//             .collect::<Vec<_>>();
+
+//         f.debug_struct("Connections")
+//             .field("initiated", &initiated)
+//             .field("accepted", &accepted)
+//             .finish()
+//     }
+// }
+
 #[derive(Debug, Default)]
-struct ConnectionSet {
-    inner: BTreeMap<(NodeId, Alpn), BTreeMap<usize, Connection>>,
+pub struct ConnectionSet {
+    pub inner: BTreeMap<(NodeId, Alpn), BTreeMap<usize, Connection>>,
 }
 
 impl ConnectionSet {

@@ -1,13 +1,23 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
 use futures::{
     FutureExt,
     future::{self, BoxFuture, join_all},
 };
-use iroh::endpoint::{ConnectOptions, Connection, TransportConfig, VarInt};
-use iroh_conn::basic::ConnectionHandler;
-use iroh_conn::testing::{ALPN_ECHO, TestNode, setup_tracing};
+use iroh::{
+    NodeId,
+    endpoint::{ConnectOptions, Connection, TransportConfig, VarInt},
+};
+use iroh_conn::{
+    basic::ConnectionHandler,
+    event::{Event, EventMappingShared, EventType},
+};
+use iroh_conn::{
+    event::EventMapping,
+    testing::{ALPN_ECHO, TestNode, setup_tracing},
+};
+use tokio::sync::Mutex;
 
 const TRACING_DIRECTIVE: &str = "off";
 // const TRACING_DIRECTIVE: &str = "basic=info,iroh_conn=info";
@@ -19,7 +29,9 @@ const ECHO_DELAY: Duration = Duration::from_millis(100);
 async fn test_two_simultaneous() -> Result<()> {
     setup_tracing(TRACING_DIRECTIVE);
 
-    let [n1, n2] = TestNode::cluster(EchoHandler, [ALPN_ECHO.to_vec()]).await?;
+    let mapping = Some(Default::default());
+    let handler = EchoHandler(mapping.clone());
+    let [n1, n2] = TestNode::cluster(handler, [ALPN_ECHO.to_vec()], mapping).await?;
 
     println!("\nfirst:\n");
     // First simultaneous call fails
@@ -36,22 +48,34 @@ async fn test_two_simultaneous() -> Result<()> {
 async fn test_three_simultaneous() -> Result<()> {
     setup_tracing(TRACING_DIRECTIVE);
 
-    let [n1, n2, n3] = TestNode::cluster(EchoHandler, [ALPN_ECHO.to_vec()]).await?;
+    let mapping = Some(Default::default());
+    let handler = EchoHandler(mapping.clone());
+    let [n1, n2, n3] = TestNode::cluster(handler, [ALPN_ECHO.to_vec()], mapping).await?;
     TestNode::rpc_cycle([&n1, &n2, &n3], b"hello").await?;
     TestNode::rpc_cycle([&n1, &n2, &n3], b"hello").await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_interweaved() -> Result<()> {
+async fn test_interwoven() -> Result<()> {
     setup_tracing(TRACING_DIRECTIVE);
 
-    let [n1, n2, n3] = TestNode::cluster(EchoHandler, [ALPN_ECHO.to_vec()]).await?;
+    let mapping = Some(Default::default());
+    let handler = EchoHandler(mapping.clone());
+    let mut lock = mapping.as_ref().unwrap().lock().await;
+
+    let [n0, n1, n2] = TestNode::cluster(handler, [ALPN_ECHO.to_vec()], mapping.clone()).await?;
+
+    for n in [&n0, &n1, &n2] {
+        let i = lock.nodes.lookup(n.endpoint().node_id()).unwrap();
+        println!("{} = {}", i, n.endpoint().node_id().fmt_short());
+    }
+    drop(lock);
 
     join_all([
+        TestNode::rpc_cycle([&n0, &n1], b"hello"),
         TestNode::rpc_cycle([&n1, &n2], b"hello"),
-        TestNode::rpc_cycle([&n2, &n3], b"hello"),
-        TestNode::rpc_cycle([&n3, &n1], b"hello"),
+        TestNode::rpc_cycle([&n2, &n0], b"hello"),
     ])
     .await
     .into_iter()
@@ -64,7 +88,9 @@ async fn test_interweaved() -> Result<()> {
 async fn test_two_simultaneous_warmed() -> Result<()> {
     setup_tracing(TRACING_DIRECTIVE);
 
-    let [n1, n2] = TestNode::cluster(EchoHandler, [ALPN_ECHO.to_vec()]).await?;
+    let mapping = Some(Default::default());
+    let handler = EchoHandler(mapping.clone());
+    let [n1, n2] = TestNode::cluster(handler, [ALPN_ECHO.to_vec()], mapping).await?;
 
     // First "warm" the connections by having a clear opener and acceptor
     println!("\nCALL 1 -> 2\n");
@@ -88,7 +114,7 @@ async fn test_two_simultaneous_warmed() -> Result<()> {
 }
 
 #[derive(Clone)]
-pub struct EchoHandler;
+pub struct EchoHandler(EventMappingShared);
 
 impl ConnectionHandler for EchoHandler {
     fn connect_options(&self) -> ConnectOptions {
@@ -100,13 +126,27 @@ impl ConnectionHandler for EchoHandler {
         })
     }
 
-    fn handle(&self, conn: Connection) -> BoxFuture<'static, Result<()>> {
+    fn handle(&self, node_id: NodeId, conn: Connection) -> BoxFuture<'static, Result<()>> {
+        let mapping = self.0.clone();
+
         async move {
             if conn.alpn() != Some(ALPN_ECHO.to_vec()) {
                 anyhow::bail!("expected ALPN {:?}, got {:?}", ALPN_ECHO, conn.alpn());
             }
 
             while let Ok((mut send, mut recv)) = conn.accept_bi().await {
+                if let Some(mapping) = mapping.clone() {
+                    let mut lock = mapping.lock().await;
+                    let event = Event::new(
+                        node_id,
+                        EventType::AcceptStream {
+                            from: conn.remote_node_id().unwrap(),
+                            conn: conn.stable_id(),
+                        },
+                    );
+                    iroh_conn::event::emit_event(event, node_id, &mut lock, None);
+                }
+
                 tracing::info!(send = ?send.id(), recv = ?recv.id(), "[accept] BEGIN");
 
                 tokio::time::sleep(ECHO_DELAY).await;
@@ -119,6 +159,18 @@ impl ConnectionHandler for EchoHandler {
 
                 send.finish()?;
                 tracing::info!("[accept] DONE");
+
+                if let Some(mapping) = mapping.clone() {
+                    let mut lock = mapping.lock().await;
+                    let event = Event::new(
+                        node_id,
+                        EventType::EndStream {
+                            to: conn.remote_node_id().unwrap(),
+                            conn: conn.stable_id(),
+                        },
+                    );
+                    iroh_conn::event::emit_event(event, node_id, &mut lock, None);
+                }
             }
             tracing::info!("handler loop for conn {} closing", conn.stable_id());
             Ok(())
