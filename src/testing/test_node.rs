@@ -1,14 +1,21 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use crate::{
     ConnectionManager,
     basic::{BasicConnectionManager, ConnectionHandler},
-    event::{EventMappingShared, EventType},
+    event::{Event, EventMappingShared, EventType},
     testing::discover,
 };
 use anyhow::Result;
-use futures::{FutureExt, future};
-use iroh::{Endpoint, endpoint::Connection};
+use futures::{
+    FutureExt,
+    future::{self, BoxFuture},
+};
+use iroh::{
+    Endpoint, NodeId,
+    endpoint::{ConnectOptions, Connection, TransportConfig, VarInt},
+};
+use n0_future::future::Boxed;
 
 pub const ALPN_ECHO: &[u8] = b"test/echo";
 
@@ -20,7 +27,7 @@ pub struct TestNode {
 
 impl TestNode {
     pub async fn new(
-        handler: impl ConnectionHandler,
+        handler: impl ConnectionHandler<EchoConnection>,
         alpns: impl IntoIterator<Item = Vec<u8>>,
         mapping: EventMappingShared,
     ) -> Result<Self> {
@@ -32,7 +39,7 @@ impl TestNode {
     }
 
     pub async fn cluster<const N: usize>(
-        handler: impl ConnectionHandler + Clone,
+        handler: impl ConnectionHandler<EchoConnection> + Clone,
         alpns: impl IntoIterator<Item = Vec<u8>>,
         mapping: EventMappingShared,
     ) -> Result<[Self; N]> {
@@ -136,5 +143,108 @@ impl TestNode {
         );
 
         Ok(())
+    }
+}
+
+/// Artificial "processing time" delay for the echo handler
+const ECHO_DELAY: Duration = Duration::from_millis(100);
+
+#[derive(Clone)]
+pub struct EchoHandler(EventMappingShared);
+
+#[derive(Clone, derive_more::Deref)]
+pub struct EchoConnection {
+    #[deref]
+    pub conn: Connection,
+
+    pub id: u64,
+}
+
+impl ConnectionHandler<EchoConnection> for EchoHandler {
+    fn connect_options(&self) -> ConnectOptions {
+        // 1 second idle timeout for these tests
+        ConnectOptions::new().with_transport_config({
+            let mut cfg = TransportConfig::default();
+            cfg.max_idle_timeout(Some(VarInt::from_u32(1_000).into()));
+            cfg.into()
+        })
+    }
+
+    fn handle(
+        &self,
+        node_id: NodeId,
+        conn: Connection,
+        initiated: bool,
+    ) -> BoxFuture<'static, Result<EchoConnection>> {
+        let mapping = self.0.clone();
+
+        async move {
+            if conn.alpn() != Some(ALPN_ECHO.to_vec()) {
+                anyhow::bail!("expected ALPN {:?}, got {:?}", ALPN_ECHO, conn.alpn());
+            }
+
+            let echo_conn = if initiated {
+                let id = conn.stable_id() as u64;
+                conn.open_uni().await?.write_all(&id.to_be_bytes()).await?;
+                EchoConnection {
+                    conn: conn.clone(),
+                    id,
+                }
+            } else {
+                let mut buf = [0; size_of::<u64>()];
+                conn.accept_uni().await?.read_exact(&mut buf).await?;
+                let id = u64::from_be_bytes(buf);
+                EchoConnection {
+                    conn: conn.clone(),
+                    id,
+                }
+            };
+
+            tokio::spawn(async move {
+                while let Ok((mut send, mut recv)) = conn.accept_bi().await {
+                    if let Some(mapping) = mapping.clone() {
+                        let mut lock = mapping.lock().await;
+                        let event = Event::new(
+                            node_id,
+                            EventType::AcceptStream {
+                                from: conn.remote_node_id().unwrap(),
+                                conn: conn.stable_id(),
+                            },
+                        );
+                        crate::event::emit_event(event, node_id, &mut lock, None);
+                    }
+
+                    tracing::info!(send = ?send.id(), recv = ?recv.id(), "[accept] BEGIN");
+
+                    tokio::time::sleep(ECHO_DELAY).await;
+
+                    let buf = recv.read_to_end(10_000).await?;
+                    tracing::info!("[accept] received msg {}", std::str::from_utf8(&buf)?);
+
+                    send.write_all(&buf).await?;
+                    tracing::info!("[accept] replied with msg {}", std::str::from_utf8(&buf)?);
+
+                    send.finish()?;
+                    tracing::info!("[accept] DONE");
+
+                    if let Some(mapping) = mapping.clone() {
+                        let mut lock = mapping.lock().await;
+                        let event = Event::new(
+                            node_id,
+                            EventType::EndStream {
+                                to: conn.remote_node_id().unwrap(),
+                                conn: conn.stable_id(),
+                            },
+                        );
+                        crate::event::emit_event(event, node_id, &mut lock, None);
+                    }
+                }
+                tracing::info!("handler loop for conn {} closing", conn.stable_id());
+                anyhow::Ok(())
+            });
+
+            Ok(echo_conn)
+        }
+        .boxed()
     }
 }

@@ -9,11 +9,16 @@ use n0_future::FutureExt;
 
 /// The ConnectionHandler trait describes how to open connections,
 /// and what to do with connections once they are established.
-pub trait ConnectionHandler: Send + Sync + 'static {
+pub trait ConnectionHandler<C = Connection>: Send + Sync + 'static {
     /// Do something with a newly established connection.
     ///
     /// This is where your protocol's listening logic goes.
-    fn handle(&self, node_id: NodeId, conn: Connection) -> BoxFuture<'static, Result<()>>;
+    fn handle(
+        &self,
+        node_id: NodeId,
+        conn: Connection,
+        initiated: bool,
+    ) -> BoxFuture<'static, Result<C>>;
 
     /// Specify the connection options to use when opening a connection.
     fn connect_options(&self) -> ConnectOptions {
@@ -45,8 +50,8 @@ pub trait ConnectionHandler: Send + Sync + 'static {
     }
 }
 
-impl ConnectionHandler for () {
-    fn handle(&self, _: NodeId, _: Connection) -> BoxFuture<'static, Result<()>> {
+impl ConnectionHandler<()> for () {
+    fn handle(&self, _: NodeId, _: Connection, _: bool) -> BoxFuture<'static, Result<()>> {
         async move { Ok(()) }.boxed()
     }
 }

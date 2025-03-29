@@ -33,9 +33,9 @@ pub use handler::ConnectionHandler;
 /// Unfortunately, it can't deduplicate connections to only a single one,
 /// as we need to rely on the remote end to close redundant connections.
 #[derive(derive_more::Debug)]
-pub struct BasicConnectionManager {
+pub struct BasicConnectionManager<C> {
     endpoint: Endpoint,
-    connections: Arc<Mutex<Connections>>,
+    connections: Arc<Mutex<Connections<C>>>,
 
     #[debug(skip)]
     handlers: Mutex<BTreeMap<Alpn, Arc<dyn ConnectionHandler>>>,
@@ -50,7 +50,7 @@ pub struct BasicConnectionManager {
 }
 
 #[async_trait::async_trait]
-impl ConnectionManager for BasicConnectionManager {
+impl<C> ConnectionManager for BasicConnectionManager<C> {
     async fn get_or_open_connection(
         &self,
         remote_addr: impl Into<NodeAddr> + Clone + Send,
@@ -160,8 +160,16 @@ impl ConnectionManager for BasicConnectionManager {
             .alpn()
             .ok_or_else(|| anyhow::anyhow!("Not tracking connections without ALPNs"))?;
 
-        if !self.handlers.lock().await.contains_key(&alpn) {
-            anyhow::bail!("No handler registered for ALPN: {:?}", alpn);
+        // Now that we have the connection we wish to use, spawn the handler for it
+        {
+            let handler = self
+                .get_handler(&alpn)
+                .await
+                .map_err(|_| anyhow::anyhow!("No handler registered for ALPN: {:?}", alpn))?;
+
+            handler
+                .handle(self.endpoint().node_id(), conn.clone(), false)
+                .await?;
         }
 
         let mut conns = self.connections.lock().await;
@@ -204,15 +212,6 @@ impl ConnectionManager for BasicConnectionManager {
                 Some(&conns),
             )
             .await;
-        }
-
-        // Now that we have the connection we wish to use, spawn the handler for it
-        {
-            let handler = self.get_handler(&alpn).await?;
-            self.spawn_task(
-                info_span!("handler accept loop"),
-                handler.handle(self.endpoint().node_id(), conn.clone()),
-            );
         }
 
         // Listen to the remote end closing the connection:
@@ -315,7 +314,7 @@ impl BasicConnectionManager {
 
         self.spawn_task(
             info_span!("open_connection handler"),
-            handler.handle(self.endpoint().node_id(), conn.clone()),
+            handler.handle(self.endpoint().node_id(), conn.clone(), true),
         );
         Ok(conn)
     }
@@ -363,7 +362,7 @@ impl BasicConnectionManager {
     }
 }
 
-impl Drop for BasicConnectionManager {
+impl<C> Drop for BasicConnectionManager<C> {
     fn drop(&mut self) {
         self.cancel.cancel();
         // quinn Connections will close automatically when dropped.
@@ -373,9 +372,13 @@ impl Drop for BasicConnectionManager {
 // Private
 
 #[derive(Debug, Default)]
-pub struct Connections {
-    pub initiated: BTreeMap<(NodeId, Alpn), Connection>,
-    pub accepted: ConnectionSet,
+pub struct Connections<C> {
+    pub initiated: BTreeMap<(NodeId, Alpn), C>,
+    pub accepted: ConnectionSet<C>,
+}
+
+pub trait ManagedConnection {
+    fn stable_id(&self) -> u64;
 }
 
 // impl Debug for Connections {
@@ -401,12 +404,12 @@ pub struct Connections {
 // }
 
 #[derive(Debug, Default)]
-pub struct ConnectionSet {
-    pub inner: BTreeMap<(NodeId, Alpn), BTreeMap<usize, Connection>>,
+pub struct ConnectionSet<C> {
+    pub inner: BTreeMap<(NodeId, Alpn), BTreeMap<u64, C>>,
 }
 
-impl ConnectionSet {
-    pub fn insert(&mut self, node_id: NodeId, alpn: Alpn, conn: Connection) -> Result<()> {
+impl<C: ManagedConnection> ConnectionSet<C> {
+    pub fn insert(&mut self, node_id: NodeId, alpn: Alpn, conn: C) -> Result<()> {
         let conns = self.inner.entry((node_id, alpn)).or_default();
         const CONN_LIMIT: usize = 5;
         anyhow::ensure!(conns.len() <= CONN_LIMIT, "Connection limit exceeded");
@@ -414,7 +417,7 @@ impl ConnectionSet {
         Ok(())
     }
 
-    pub fn remove(&mut self, node_id: NodeId, alpn: Alpn, conn: &Connection) {
+    pub fn remove(&mut self, node_id: NodeId, alpn: Alpn, conn: &C) {
         if let Entry::Occupied(mut entry) = self.inner.entry((node_id, alpn)) {
             entry.get_mut().remove(&conn.stable_id());
             if entry.get().is_empty() {
@@ -427,7 +430,7 @@ impl ConnectionSet {
         &mut self,
         node_id: NodeId,
         alpn: Alpn,
-    ) -> Entry<'_, (NodeId, Alpn), BTreeMap<usize, Connection>> {
+    ) -> Entry<'_, (NodeId, Alpn), BTreeMap<u64, C>> {
         self.inner.entry((node_id, alpn))
     }
 }

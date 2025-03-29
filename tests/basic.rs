@@ -22,9 +22,6 @@ use tokio::sync::Mutex;
 const TRACING_DIRECTIVE: &str = "off";
 // const TRACING_DIRECTIVE: &str = "basic=info,iroh_conn=info";
 
-/// Artificial "processing time" delay for the echo handler
-const ECHO_DELAY: Duration = Duration::from_millis(100);
-
 #[tokio::test(flavor = "multi_thread")]
 async fn test_two_simultaneous() -> Result<()> {
     setup_tracing(TRACING_DIRECTIVE);
@@ -111,70 +108,4 @@ async fn test_two_simultaneous_warmed() -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
 
     Ok(())
-}
-
-#[derive(Clone)]
-pub struct EchoHandler(EventMappingShared);
-
-impl ConnectionHandler for EchoHandler {
-    fn connect_options(&self) -> ConnectOptions {
-        // 1 second idle timeout for these tests
-        ConnectOptions::new().with_transport_config({
-            let mut cfg = TransportConfig::default();
-            cfg.max_idle_timeout(Some(VarInt::from_u32(1_000).into()));
-            cfg.into()
-        })
-    }
-
-    fn handle(&self, node_id: NodeId, conn: Connection) -> BoxFuture<'static, Result<()>> {
-        let mapping = self.0.clone();
-
-        async move {
-            if conn.alpn() != Some(ALPN_ECHO.to_vec()) {
-                anyhow::bail!("expected ALPN {:?}, got {:?}", ALPN_ECHO, conn.alpn());
-            }
-
-            while let Ok((mut send, mut recv)) = conn.accept_bi().await {
-                if let Some(mapping) = mapping.clone() {
-                    let mut lock = mapping.lock().await;
-                    let event = Event::new(
-                        node_id,
-                        EventType::AcceptStream {
-                            from: conn.remote_node_id().unwrap(),
-                            conn: conn.stable_id(),
-                        },
-                    );
-                    iroh_conn::event::emit_event(event, node_id, &mut lock, None);
-                }
-
-                tracing::info!(send = ?send.id(), recv = ?recv.id(), "[accept] BEGIN");
-
-                tokio::time::sleep(ECHO_DELAY).await;
-
-                let buf = recv.read_to_end(10_000).await?;
-                tracing::info!("[accept] received msg {}", std::str::from_utf8(&buf)?);
-
-                send.write_all(&buf).await?;
-                tracing::info!("[accept] replied with msg {}", std::str::from_utf8(&buf)?);
-
-                send.finish()?;
-                tracing::info!("[accept] DONE");
-
-                if let Some(mapping) = mapping.clone() {
-                    let mut lock = mapping.lock().await;
-                    let event = Event::new(
-                        node_id,
-                        EventType::EndStream {
-                            to: conn.remote_node_id().unwrap(),
-                            conn: conn.stable_id(),
-                        },
-                    );
-                    iroh_conn::event::emit_event(event, node_id, &mut lock, None);
-                }
-            }
-            tracing::info!("handler loop for conn {} closing", conn.stable_id());
-            Ok(())
-        }
-        .boxed()
-    }
 }
