@@ -27,16 +27,16 @@ where
                 write!(f, "{:>16} : {node} <~ {from} : {conn}", "AcceptConnection")
             }
             EventType::CloseConnection { to, conn } => {
-                write!(f, "{:>16} : {node} ~> {to} : {conn}", "CloseConnection")
+                write!(f, "{:>16} : {node} ~~ {to} : {conn}", "CloseConnection")
             }
             EventType::OpenStream { to, conn } => {
                 write!(f, "{:>16} : {node} ~> {to} : {conn}", "OpenStream")
             }
             EventType::AcceptStream { from, conn } => {
-                write!(f, "{:>16} : {node} ~> {from} : {conn}", "AcceptStream")
+                write!(f, "{:>16} : {node} <~ {from} : {conn}", "AcceptStream")
             }
             EventType::EndStream { to, conn } => {
-                write!(f, "{:>16} : {node} ~> {to} : {conn}", "EndStream")
+                write!(f, "{:>16} : {node} ~~ {to} : {conn}", "EndStream")
             }
         }
     }
@@ -155,11 +155,11 @@ pub type EventMappingShared = Option<Arc<Mutex<EventMapping>>>;
 #[derive(Default)]
 pub struct EventMapping {
     pub nodes: IdMap<NodeId, Nid>,
-    pub conns: IdMap<usize, ConId>,
+    pub conns: IdMap<u64, ConId>,
 }
 
 impl EventMapping {
-    pub fn apply(&mut self, event: Event<NodeId, usize>) -> Event<Nid, ConId> {
+    pub fn apply(&mut self, event: Event<NodeId, u64>) -> Event<Nid, ConId> {
         assert_ne!(event.node, *event.event.remote(), "{event:?}");
         Event {
             node: self.nodes.lookup(event.node).unwrap(),
@@ -194,7 +194,7 @@ impl EventMapping {
 }
 
 pub fn emit_event(
-    event: Event<NodeId, usize>,
+    event: Event<NodeId, u64>,
     node_id: NodeId,
     lock: &mut EventMapping,
     conns: Option<&Connections>,

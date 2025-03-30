@@ -18,6 +18,7 @@ use tracing::{Instrument, info_span};
 use crate::{
     Alpn, ConnectionManager,
     event::{Event, EventMappingShared, EventType},
+    testing::EchoConnection,
 };
 
 mod handler;
@@ -33,12 +34,12 @@ pub use handler::ConnectionHandler;
 /// Unfortunately, it can't deduplicate connections to only a single one,
 /// as we need to rely on the remote end to close redundant connections.
 #[derive(derive_more::Debug)]
-pub struct BasicConnectionManager<C> {
+pub struct BasicConnectionManager {
     endpoint: Endpoint,
-    connections: Arc<Mutex<Connections<C>>>,
+    connections: Arc<Mutex<Connections>>,
 
     #[debug(skip)]
-    handlers: Mutex<BTreeMap<Alpn, Arc<dyn ConnectionHandler>>>,
+    handlers: Mutex<BTreeMap<Alpn, Arc<dyn ConnectionHandler<EchoConnection>>>>,
 
     // Handling subtask cancellation, aborted on drop
     #[debug(skip)]
@@ -46,16 +47,16 @@ pub struct BasicConnectionManager<C> {
 
     #[cfg(feature = "modeling")]
     #[debug(skip)]
-    events: EventMappingShared,
+    pub events: EventMappingShared,
 }
 
 #[async_trait::async_trait]
-impl<C> ConnectionManager for BasicConnectionManager<C> {
+impl ConnectionManager<EchoConnection> for BasicConnectionManager {
     async fn get_or_open_connection(
         &self,
         remote_addr: impl Into<NodeAddr> + Clone + Send,
         alpn: &[u8],
-    ) -> Result<Connection> {
+    ) -> Result<EchoConnection> {
         let remote_addr = remote_addr.into();
         let remote_node_id = remote_addr.node_id;
 
@@ -77,6 +78,7 @@ impl<C> ConnectionManager for BasicConnectionManager<C> {
                     remote_node_id
                 );
                 let conn = self.open_connection(remote_node_id, alpn).await?;
+                let conn = EchoConnection::new(conn.stable_id() as u64, conn);
                 tracing::trace!(conn = conn.stable_id(), "opened connection");
                 spot.insert(conn.clone());
 
@@ -161,7 +163,7 @@ impl<C> ConnectionManager for BasicConnectionManager<C> {
             .ok_or_else(|| anyhow::anyhow!("Not tracking connections without ALPNs"))?;
 
         // Now that we have the connection we wish to use, spawn the handler for it
-        {
+        let conn = {
             let handler = self
                 .get_handler(&alpn)
                 .await
@@ -169,8 +171,8 @@ impl<C> ConnectionManager for BasicConnectionManager<C> {
 
             handler
                 .handle(self.endpoint().node_id(), conn.clone(), false)
-                .await?;
-        }
+                .await?
+        };
 
         let mut conns = self.connections.lock().await;
         if let Err(_) = conns
@@ -283,7 +285,7 @@ impl BasicConnectionManager {
     pub async fn register_handler(
         &self,
         alpns: Vec<Alpn>,
-        handler: impl ConnectionHandler,
+        handler: impl ConnectionHandler<EchoConnection>,
     ) -> Result<()> {
         let handler = Arc::new(handler);
         let mut lock = self.handlers.lock().await;
@@ -319,7 +321,7 @@ impl BasicConnectionManager {
         Ok(conn)
     }
 
-    async fn get_handler(&self, alpn: &[u8]) -> Result<Arc<dyn ConnectionHandler>> {
+    async fn get_handler(&self, alpn: &[u8]) -> Result<Arc<dyn ConnectionHandler<EchoConnection>>> {
         Ok(self
             .handlers
             .lock()
@@ -331,7 +333,7 @@ impl BasicConnectionManager {
 
     pub async fn emit_event(
         &self,
-        event_type: EventType<NodeId, usize>,
+        event_type: EventType<NodeId, u64>,
         conns: Option<&Connections>,
     ) {
         if let Some(events) = &self.events {
@@ -362,7 +364,7 @@ impl BasicConnectionManager {
     }
 }
 
-impl<C> Drop for BasicConnectionManager<C> {
+impl Drop for BasicConnectionManager {
     fn drop(&mut self) {
         self.cancel.cancel();
         // quinn Connections will close automatically when dropped.
@@ -372,13 +374,19 @@ impl<C> Drop for BasicConnectionManager<C> {
 // Private
 
 #[derive(Debug, Default)]
-pub struct Connections<C> {
-    pub initiated: BTreeMap<(NodeId, Alpn), C>,
-    pub accepted: ConnectionSet<C>,
+pub struct Connections {
+    pub initiated: BTreeMap<(NodeId, Alpn), EchoConnection>,
+    pub accepted: ConnectionSet,
 }
 
 pub trait ManagedConnection {
     fn stable_id(&self) -> u64;
+}
+
+impl ManagedConnection for Connection {
+    fn stable_id(&self) -> u64 {
+        Connection::stable_id(self) as u64
+    }
 }
 
 // impl Debug for Connections {
@@ -404,12 +412,12 @@ pub trait ManagedConnection {
 // }
 
 #[derive(Debug, Default)]
-pub struct ConnectionSet<C> {
-    pub inner: BTreeMap<(NodeId, Alpn), BTreeMap<u64, C>>,
+pub struct ConnectionSet {
+    pub inner: BTreeMap<(NodeId, Alpn), BTreeMap<u64, EchoConnection>>,
 }
 
-impl<C: ManagedConnection> ConnectionSet<C> {
-    pub fn insert(&mut self, node_id: NodeId, alpn: Alpn, conn: C) -> Result<()> {
+impl ConnectionSet {
+    pub fn insert(&mut self, node_id: NodeId, alpn: Alpn, conn: EchoConnection) -> Result<()> {
         let conns = self.inner.entry((node_id, alpn)).or_default();
         const CONN_LIMIT: usize = 5;
         anyhow::ensure!(conns.len() <= CONN_LIMIT, "Connection limit exceeded");
@@ -417,7 +425,7 @@ impl<C: ManagedConnection> ConnectionSet<C> {
         Ok(())
     }
 
-    pub fn remove(&mut self, node_id: NodeId, alpn: Alpn, conn: &C) {
+    pub fn remove(&mut self, node_id: NodeId, alpn: Alpn, conn: &EchoConnection) {
         if let Entry::Occupied(mut entry) = self.inner.entry((node_id, alpn)) {
             entry.get_mut().remove(&conn.stable_id());
             if entry.get().is_empty() {
@@ -430,7 +438,7 @@ impl<C: ManagedConnection> ConnectionSet<C> {
         &mut self,
         node_id: NodeId,
         alpn: Alpn,
-    ) -> Entry<'_, (NodeId, Alpn), BTreeMap<u64, C>> {
+    ) -> Entry<'_, (NodeId, Alpn), BTreeMap<u64, EchoConnection>> {
         self.inner.entry((node_id, alpn))
     }
 }

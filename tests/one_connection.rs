@@ -144,7 +144,7 @@ impl OneConn {
 }
 
 #[async_trait::async_trait]
-impl ConnectionManager for OneConn {
+impl ConnectionManager<Connection> for OneConn {
     /// Return the current connection, if any.
     async fn get_or_open_connection(
         &self,

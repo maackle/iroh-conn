@@ -2,11 +2,11 @@ use std::{sync::Arc, time::Duration};
 
 use crate::{
     ConnectionManager,
-    basic::{BasicConnectionManager, ConnectionHandler},
+    basic::{BasicConnectionManager, ConnectionHandler, ManagedConnection},
     event::{Event, EventMappingShared, EventType},
     testing::discover,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use futures::{
     FutureExt,
     future::{self, BoxFuture},
@@ -65,21 +65,14 @@ impl TestNode {
     }
 
     #[tracing::instrument(skip_all, fields(node = self.endpoint().node_id().fmt_short(), remote = n.endpoint().node_id().fmt_short()))]
-    pub async fn connect(&self, n: &Self, alpn: &[u8]) -> Result<Connection> {
+    pub async fn connect(&self, n: &Self, alpn: &[u8]) -> Result<EchoConnection> {
         let conn = self
             .get_or_open_connection(n.manager.endpoint().node_id(), alpn)
             .await?;
         Ok(conn)
     }
 
-    /// Make a single RPC to the given node
-    pub async fn rpc(&self, n: &Self, msg: &[u8]) -> Result<Vec<u8>> {
-        tracing::info!(
-            "[caller] BEGIN {} -> {}",
-            self.endpoint().node_id().fmt_short(),
-            n.endpoint().node_id().fmt_short()
-        );
-        let conn = self.connect(n, ALPN_ECHO).await?;
+    async fn rpc_inner(&self, n: &Self, msg: &[u8], conn: EchoConnection) -> Result<Vec<u8>> {
         let (mut send, mut recv) = conn.open_bi().await?;
         self.manager
             .emit_event(
@@ -113,6 +106,30 @@ impl TestNode {
         Ok(response)
     }
 
+    /// Make a single RPC to the given node
+    pub async fn rpc(&self, n: &Self, msg: &[u8]) -> Result<Vec<u8>> {
+        tracing::info!(
+            "[caller] BEGIN {} -> {}",
+            self.endpoint().node_id().fmt_short(),
+            n.endpoint().node_id().fmt_short()
+        );
+        let conn = self
+            .connect(n, ALPN_ECHO)
+            .await
+            .context("rpc() couldn't establish connection")?;
+
+        match self.rpc_inner(n, msg, conn.clone()).await {
+            Ok(response) => Ok(response),
+            Err(e) => {
+                let mut ev = self.manager.events.as_ref().unwrap().lock().await;
+                let i = ev.nodes.lookup(self.endpoint().node_id()).unwrap();
+                let j = ev.nodes.lookup(n.endpoint().node_id()).unwrap();
+                let c = ev.conns.lookup(conn.stable_id()).unwrap();
+                Err(anyhow::anyhow!("rpc error: {e}, {i} -/-> {j} : {c}"))
+            }
+        }
+    }
+
     /// Given a list of nodes, have each node simultaneously make an RPC to the
     /// next node in the list in a circular manner.
     pub async fn rpc_cycle(ns: impl IntoIterator<Item = &Self>, msg: &[u8]) -> Result<()> {
@@ -123,13 +140,8 @@ impl TestNode {
             let j = (i + 1) % num;
             let n = ns[i].clone();
             let m = ns[j].clone();
-            let epn = n.manager.endpoint().node_id().fmt_short();
-            let epm = m.manager.endpoint().node_id().fmt_short();
-            calls.push(async move {
-                n.rpc(&m, msg).await.map_err(move |e| {
-                    anyhow::anyhow!("rpc_cycle error: {e}, {i} ({epn}) -> {j} ({epm})")
-                })
-            });
+            let m = ns[j].clone();
+            calls.push(async move { n.rpc(&m, msg).await });
         }
 
         let results = future::join_all(calls)
@@ -149,15 +161,21 @@ impl TestNode {
 /// Artificial "processing time" delay for the echo handler
 const ECHO_DELAY: Duration = Duration::from_millis(100);
 
-#[derive(Clone)]
+#[derive(Clone, derive_more::Constructor)]
 pub struct EchoHandler(EventMappingShared);
 
-#[derive(Clone, derive_more::Deref)]
+#[derive(Clone, Debug, derive_more::Deref, derive_more::Constructor)]
 pub struct EchoConnection {
+    pub id: u64,
+
     #[deref]
     pub conn: Connection,
+}
 
-    pub id: u64,
+impl ManagedConnection for EchoConnection {
+    fn stable_id(&self) -> u64 {
+        self.id
+    }
 }
 
 impl ConnectionHandler<EchoConnection> for EchoHandler {
@@ -183,7 +201,7 @@ impl ConnectionHandler<EchoConnection> for EchoHandler {
                 anyhow::bail!("expected ALPN {:?}, got {:?}", ALPN_ECHO, conn.alpn());
             }
 
-            let echo_conn = if initiated {
+            let conn = if initiated {
                 let id = conn.stable_id() as u64;
                 conn.open_uni().await?.write_all(&id.to_be_bytes()).await?;
                 EchoConnection {
@@ -199,6 +217,8 @@ impl ConnectionHandler<EchoConnection> for EchoHandler {
                     id,
                 }
             };
+
+            let echo_conn = conn.clone();
 
             tokio::spawn(async move {
                 while let Ok((mut send, mut recv)) = conn.accept_bi().await {

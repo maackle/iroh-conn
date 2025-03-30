@@ -7,9 +7,11 @@ use iroh::{
 };
 use n0_future::FutureExt;
 
+use super::ManagedConnection;
+
 /// The ConnectionHandler trait describes how to open connections,
 /// and what to do with connections once they are established.
-pub trait ConnectionHandler<C = Connection>: Send + Sync + 'static {
+pub trait ConnectionHandler<C: ManagedConnection>: Send + Sync + 'static {
     /// Do something with a newly established connection.
     ///
     /// This is where your protocol's listening logic goes.
@@ -50,8 +52,8 @@ pub trait ConnectionHandler<C = Connection>: Send + Sync + 'static {
     }
 }
 
-impl ConnectionHandler<()> for () {
-    fn handle(&self, _: NodeId, _: Connection, _: bool) -> BoxFuture<'static, Result<()>> {
-        async move { Ok(()) }.boxed()
-    }
-}
+// impl ConnectionHandler<()> for () {
+//     fn handle(&self, _: NodeId, _: Connection, _: bool) -> BoxFuture<'static, Result<()>> {
+//         async move { Ok(()) }.boxed()
+//     }
+// }

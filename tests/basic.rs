@@ -1,3 +1,5 @@
+#![cfg(feature = "testing")]
+
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
@@ -12,6 +14,7 @@ use iroh::{
 use iroh_conn::{
     basic::ConnectionHandler,
     event::{Event, EventMappingShared, EventType},
+    testing::EchoHandler,
 };
 use iroh_conn::{
     event::EventMapping,
@@ -27,7 +30,7 @@ async fn test_two_simultaneous() -> Result<()> {
     setup_tracing(TRACING_DIRECTIVE);
 
     let mapping = Some(Default::default());
-    let handler = EchoHandler(mapping.clone());
+    let handler = EchoHandler::new(mapping.clone());
     let [n1, n2] = TestNode::cluster(handler, [ALPN_ECHO.to_vec()], mapping).await?;
 
     println!("\nfirst:\n");
@@ -46,7 +49,7 @@ async fn test_three_simultaneous() -> Result<()> {
     setup_tracing(TRACING_DIRECTIVE);
 
     let mapping = Some(Default::default());
-    let handler = EchoHandler(mapping.clone());
+    let handler = EchoHandler::new(mapping.clone());
     let [n1, n2, n3] = TestNode::cluster(handler, [ALPN_ECHO.to_vec()], mapping).await?;
     TestNode::rpc_cycle([&n1, &n2, &n3], b"hello").await?;
     TestNode::rpc_cycle([&n1, &n2, &n3], b"hello").await?;
@@ -58,7 +61,7 @@ async fn test_interwoven() -> Result<()> {
     setup_tracing(TRACING_DIRECTIVE);
 
     let mapping = Some(Default::default());
-    let handler = EchoHandler(mapping.clone());
+    let handler = EchoHandler::new(mapping.clone());
     let mut lock = mapping.as_ref().unwrap().lock().await;
 
     let [n0, n1, n2] = TestNode::cluster(handler, [ALPN_ECHO.to_vec()], mapping.clone()).await?;
@@ -86,7 +89,7 @@ async fn test_two_simultaneous_warmed() -> Result<()> {
     setup_tracing(TRACING_DIRECTIVE);
 
     let mapping = Some(Default::default());
-    let handler = EchoHandler(mapping.clone());
+    let handler = EchoHandler::new(mapping.clone());
     let [n1, n2] = TestNode::cluster(handler, [ALPN_ECHO.to_vec()], mapping).await?;
 
     // First "warm" the connections by having a clear opener and acceptor

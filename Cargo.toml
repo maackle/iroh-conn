@@ -8,6 +8,7 @@ anyhow = "1.0.97"
 async-trait = "0.1.88"
 blake3 = "1.7.0"
 derive_more = { version = "2.0.1", features = [
+  "constructor",
   "debug",
   "deref",
   "display",
