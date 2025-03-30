@@ -12,15 +12,17 @@ use super::ManagedConnection;
 /// The ConnectionHandler trait describes how to open connections,
 /// and what to do with connections once they are established.
 pub trait ConnectionHandler<C: ManagedConnection>: Send + Sync + 'static {
-    /// Do something with a newly established connection.
-    ///
-    /// This is where your protocol's listening logic goes.
-    fn handle(
+    fn confirm(
         &self,
         node_id: NodeId,
         conn: Connection,
         initiated: bool,
     ) -> BoxFuture<'static, Result<C>>;
+
+    /// Do something with a newly established connection.
+    ///
+    /// This is where your protocol's listening logic goes.
+    fn handle(&self, node_id: NodeId, conn: C, initiated: bool) -> BoxFuture<'static, Result<C>>;
 
     /// Specify the connection options to use when opening a connection.
     fn connect_options(&self) -> ConnectOptions {

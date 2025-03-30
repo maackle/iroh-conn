@@ -188,14 +188,12 @@ impl ConnectionHandler<EchoConnection> for EchoHandler {
         })
     }
 
-    fn handle(
+    fn confirm(
         &self,
         node_id: NodeId,
         conn: Connection,
         initiated: bool,
     ) -> BoxFuture<'static, Result<EchoConnection>> {
-        let mapping = self.0.clone();
-
         async move {
             if conn.alpn() != Some(ALPN_ECHO.to_vec()) {
                 anyhow::bail!("expected ALPN {:?}, got {:?}", ALPN_ECHO, conn.alpn());
@@ -218,6 +216,20 @@ impl ConnectionHandler<EchoConnection> for EchoHandler {
                 }
             };
 
+            Ok(conn)
+        }
+        .boxed()
+    }
+
+    fn handle(
+        &self,
+        node_id: NodeId,
+        conn: EchoConnection,
+        initiated: bool,
+    ) -> BoxFuture<'static, Result<EchoConnection>> {
+        let mapping = self.0.clone();
+
+        async move {
             let echo_conn = conn.clone();
 
             tokio::spawn(async move {

@@ -78,7 +78,6 @@ impl ConnectionManager<EchoConnection> for BasicConnectionManager {
                     remote_node_id
                 );
                 let conn = self.open_connection(remote_node_id, alpn).await?;
-                let conn = EchoConnection::new(conn.stable_id() as u64, conn);
                 tracing::trace!(conn = conn.stable_id(), "opened connection");
                 spot.insert(conn.clone());
 
@@ -162,15 +161,15 @@ impl ConnectionManager<EchoConnection> for BasicConnectionManager {
             .alpn()
             .ok_or_else(|| anyhow::anyhow!("Not tracking connections without ALPNs"))?;
 
+        let handler = self
+            .get_handler(&alpn)
+            .await
+            .map_err(|_| anyhow::anyhow!("No handler registered for ALPN: {:?}", alpn))?;
+
         // Now that we have the connection we wish to use, spawn the handler for it
         let conn = {
-            let handler = self
-                .get_handler(&alpn)
-                .await
-                .map_err(|_| anyhow::anyhow!("No handler registered for ALPN: {:?}", alpn))?;
-
             handler
-                .handle(self.endpoint().node_id(), conn.clone(), false)
+                .confirm(self.endpoint().node_id(), conn.clone(), false)
                 .await?
         };
 
@@ -200,21 +199,44 @@ impl ConnectionManager<EchoConnection> for BasicConnectionManager {
         if let Entry::Occupied(initiated_conn) =
             conns.initiated.entry((remote_node_id, alpn.clone()))
         {
-            if !self.prefer_initiated(remote_node_id) {
-                initiated_conn.remove().close(
+            if self.prefer_initiated(remote_node_id) {
+                // NOTE: this is something maackle added
+                conn.close(
                     Self::CLOSE_CONNECTION_SUPERSEDED_CODE.into(),
                     &Self::CLOSE_CONNECTION_SUPERSEDED_MSG,
                 );
+                self.emit_event(
+                    EventType::CloseConnection {
+                        to: remote_node_id,
+                        conn: conn.stable_id(),
+                    },
+                    Some(&conns),
+                )
+                .await;
+                return Ok(());
+            } else {
+                let closed = initiated_conn.remove();
+                closed.close(
+                    Self::CLOSE_CONNECTION_SUPERSEDED_CODE.into(),
+                    &Self::CLOSE_CONNECTION_SUPERSEDED_MSG,
+                );
+                self.emit_event(
+                    EventType::CloseConnection {
+                        to: remote_node_id,
+                        conn: closed.stable_id(),
+                    },
+                    Some(&conns),
+                )
+                .await;
             }
-            self.emit_event(
-                EventType::CloseConnection {
-                    to: remote_node_id,
-                    conn: conn.stable_id(),
-                },
-                Some(&conns),
-            )
-            .await;
         }
+
+        // Now that we have the connection we wish to use, spawn the handler for it
+        let conn = {
+            handler
+                .handle(self.endpoint().node_id(), conn.clone(), false)
+                .await?
+        };
 
         // Listen to the remote end closing the connection:
         self.spawn_task(info_span!("observe_closed"), {
@@ -301,7 +323,7 @@ impl BasicConnectionManager {
         Ok(())
     }
 
-    async fn open_connection(&self, remote_node_id: NodeId, alpn: &[u8]) -> Result<Connection> {
+    async fn open_connection(&self, remote_node_id: NodeId, alpn: &[u8]) -> Result<EchoConnection> {
         let handler = self.get_handler(alpn).await?;
         tracing::trace!(
             "using handler to open connection {} -> {}, alpn={:?}",
@@ -312,6 +334,10 @@ impl BasicConnectionManager {
         // let conn = self.endpoint.connect(remote_node_id, &alpn).await?;
         let conn = handler
             .open(self.endpoint.clone(), remote_node_id, alpn.to_vec())
+            .await?;
+
+        let conn = handler
+            .confirm(self.endpoint().node_id(), conn.clone(), true)
             .await?;
 
         self.spawn_task(
