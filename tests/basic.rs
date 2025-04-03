@@ -1,26 +1,9 @@
 #![cfg(feature = "testing")]
 
-use std::{sync::Arc, time::Duration};
-
 use anyhow::Result;
-use futures::{
-    FutureExt,
-    future::{self, BoxFuture, join_all},
-};
-use iroh::{
-    NodeId,
-    endpoint::{ConnectOptions, Connection, TransportConfig, VarInt},
-};
-use iroh_conn::{
-    basic::ConnectionHandler,
-    event::{Event, EventMappingShared, EventType},
-    testing::EchoHandler,
-};
-use iroh_conn::{
-    event::EventMapping,
-    testing::{ALPN_ECHO, TestNode, setup_tracing},
-};
-use tokio::sync::Mutex;
+use futures::future::{self, join_all};
+use iroh_conn::testing::EchoHandler;
+use iroh_conn::testing::{ALPN_ECHO, TestNode, setup_tracing};
 
 const TRACING_DIRECTIVE: &str = "off";
 // const TRACING_DIRECTIVE: &str = "basic=info,iroh_conn=info";

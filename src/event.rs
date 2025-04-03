@@ -21,13 +21,13 @@ where
         let node = &self.node;
         match &self.event {
             EventType::OpenConnection { to, conn } => {
-                write!(f, "{:>16} : {node} ~> {to} : {conn}", "OpenConnection")
+                write!(f, "{:>16} : {node} -> {to} : {conn}", "OpenConnection")
             }
             EventType::AcceptConnection { from, conn } => {
-                write!(f, "{:>16} : {node} <~ {from} : {conn}", "AcceptConnection")
+                write!(f, "{:>16} : {node} <- {from} : {conn}", "AcceptConnection")
             }
             EventType::CloseConnection { to, conn } => {
-                write!(f, "{:>16} : {node} ~~ {to} : {conn}", "CloseConnection")
+                write!(f, "{:>16} : {node} xx {to} : {conn}", "CloseConnection")
             }
             EventType::OpenStream { to, conn } => {
                 write!(f, "{:>16} : {node} ~> {to} : {conn}", "OpenStream")
@@ -36,7 +36,7 @@ where
                 write!(f, "{:>16} : {node} <~ {from} : {conn}", "AcceptStream")
             }
             EventType::EndStream { to, conn } => {
-                write!(f, "{:>16} : {node} ~~ {to} : {conn}", "EndStream")
+                write!(f, "{:>16} : {node} xx {to} : {conn}", "EndStream")
             }
         }
     }
