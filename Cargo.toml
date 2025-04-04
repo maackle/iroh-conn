@@ -28,6 +28,8 @@ polestar = { git = "https://github.com/maackle/polestar-rs", optional = true }
 iroh-conn = { path = ".", features = ["testing"] }
 
 [features]
-default = ["modeling", "testing"]
+default = ["testing", "modeling"]
+
+# TODO: this feature cannot be turned off!
 modeling = ["polestar"]
 testing = []

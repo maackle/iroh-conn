@@ -121,11 +121,19 @@ impl TestNode {
         match self.rpc_inner(n, msg, conn.clone()).await {
             Ok(response) => Ok(response),
             Err(e) => {
-                let mut ev = self.manager.events.as_ref().unwrap().lock().await;
-                let i = ev.nodes.lookup(self.endpoint().node_id()).unwrap();
-                let j = ev.nodes.lookup(n.endpoint().node_id()).unwrap();
-                let c = ev.conns.lookup(conn.stable_id()).unwrap();
-                Err(anyhow::anyhow!("rpc error: {e}, {i} -/-> {j} : {c}"))
+                #[cfg(feature = "modeling")]
+                {
+                    let mut ev = self.manager.events.as_ref().unwrap().lock().await;
+                    let i = ev.nodes.lookup(self.endpoint().node_id()).unwrap();
+                    let j = ev.nodes.lookup(n.endpoint().node_id()).unwrap();
+                    let c = ev.conns.lookup(conn.stable_id()).unwrap();
+                    Err(anyhow::anyhow!("rpc error: {e}, {i} -/-> {j} : {c}"))
+                }
+
+                #[cfg(not(feature = "modeling"))]
+                {
+                    Err(e)
+                }
             }
         }
     }
