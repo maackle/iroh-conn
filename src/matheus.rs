@@ -16,13 +16,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info_span};
 
 use crate::{
-    Alpn, ConnectionManager,
+    Alpn, ConnectionHandler, ConnectionManager,
     event::{Event, EventMappingShared, EventType, EventTypeSystem},
+    handler::ManagedConnection,
     testing::EchoConnection,
 };
-
-mod handler;
-pub use handler::ConnectionHandler;
 
 /// A connection manager.
 ///
@@ -78,20 +76,19 @@ impl ConnectionManager<EchoConnection> for BasicConnectionManager {
                     remote_node_id
                 );
                 let conn = self.open_connection(remote_node_id, alpn).await?;
-                tracing::trace!(conn = conn.stable_id(), "opened connection");
+                tracing::trace!(conn = conn.shared_id(), "opened connection");
                 spot.insert(conn.clone());
 
                 self.emit_event(
-                    EventType::OpenConnection {
-                        to: remote_node_id,
-                        conn: conn.stable_id(),
-                    },
+                    remote_node_id,
+                    conn.shared_id(),
+                    EventType::OpenConnection,
                     Some(&conns),
                 )
                 .await;
 
                 tracing::debug!(
-                    conn = conn.stable_id(),
+                    conn = conn.shared_id(),
                     "opened and registered new connection"
                 );
                 conn
@@ -109,14 +106,14 @@ impl ConnectionManager<EchoConnection> for BasicConnectionManager {
                     .min_by_key(|conn| conn.rtt())
                     .expect("always one conn in ConnectionSet entry")
                     .clone();
-                tracing::debug!(conn = conn.stable_id(), "reusing accepted connection");
+                tracing::debug!(conn = conn.shared_id(), "reusing accepted connection");
                 conn
             }
 
             // We have already initiated a connection for this - reuse it.
             (Entry::Occupied(initiated_conn), Entry::Vacant(_)) => {
                 let conn = initiated_conn.get().clone();
-                tracing::debug!(conn = conn.stable_id(), "reusing initiated connection");
+                tracing::debug!(conn = conn.shared_id(), "reusing initiated connection");
                 conn
             }
 
@@ -138,13 +135,13 @@ impl ConnectionManager<EchoConnection> for BasicConnectionManager {
                         .expect("always one conn in ConnectionSet entry")
                         .clone();
                     tracing::debug!(
-                        conn = best_conn.stable_id(),
+                        conn = best_conn.shared_id(),
                         "closing initiated connection to use accepted connection"
                     );
                     best_conn
                 } else {
                     let conn = initiated_conn.get().clone();
-                    tracing::debug!(conn = conn.stable_id(), "keeping initiated connection");
+                    tracing::debug!(conn = conn.shared_id(), "keeping initiated connection");
                     conn
                 }
             }
@@ -155,7 +152,7 @@ impl ConnectionManager<EchoConnection> for BasicConnectionManager {
     }
 
     async fn handle_incoming_connection(&self, conn: Connection) -> Result<()> {
-        tracing::debug!(conn = conn.stable_id(), "handling incoming connection");
+        tracing::debug!(conn = conn.shared_id(), "handling incoming connection");
         let remote_node_id = conn.remote_node_id()?;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -190,10 +187,9 @@ impl ConnectionManager<EchoConnection> for BasicConnectionManager {
         }
 
         self.emit_event(
-            EventType::AcceptConnection {
-                from: remote_node_id,
-                conn: conn.stable_id(),
-            },
+            remote_node_id,
+            conn.shared_id(),
+            EventType::AcceptConnection,
             Some(&conns),
         )
         .await;
@@ -202,32 +198,16 @@ impl ConnectionManager<EchoConnection> for BasicConnectionManager {
         if let Entry::Occupied(initiated_conn) =
             conns.initiated.entry((remote_node_id, alpn.clone()))
         {
-            if self.prefer_initiated(remote_node_id) {
-                // NOTE: this is something maackle added
-                conn.close(
-                    Self::CLOSE_CONNECTION_SUPERSEDED_CODE.into(),
-                    &Self::CLOSE_CONNECTION_SUPERSEDED_MSG,
-                );
-                self.emit_event(
-                    EventType::CloseConnection {
-                        to: remote_node_id,
-                        conn: conn.stable_id(),
-                    },
-                    Some(&conns),
-                )
-                .await;
-                return Ok(());
-            } else {
+            if !self.prefer_initiated(remote_node_id) {
                 let closed = initiated_conn.remove();
                 closed.close(
                     Self::CLOSE_CONNECTION_SUPERSEDED_CODE.into(),
                     &Self::CLOSE_CONNECTION_SUPERSEDED_MSG,
                 );
                 self.emit_event(
-                    EventType::CloseConnection {
-                        to: remote_node_id,
-                        conn: closed.stable_id(),
-                    },
+                    remote_node_id,
+                    conn.shared_id(),
+                    EventType::CloseConnection,
                     Some(&conns),
                 )
                 .await;
@@ -242,6 +222,7 @@ impl ConnectionManager<EchoConnection> for BasicConnectionManager {
         };
 
         // Listen to the remote end closing the connection:
+        // see [a98sndiond]
         self.spawn_task(info_span!("observe_closed"), {
             let conns = self.connections.clone();
             let alpn = alpn.clone();
@@ -360,10 +341,16 @@ impl BasicConnectionManager {
             .clone())
     }
 
-    pub async fn emit_event(&self, event_type: EventTypeSystem, conns: Option<&Connections>) {
+    pub async fn emit_event(
+        &self,
+        remote: NodeId,
+        conn: u64,
+        event_type: EventTypeSystem,
+        conns: Option<&Connections>,
+    ) {
         if let Some(events) = &self.events {
             let mut lock = events.lock().await;
-            let event = Event::new(self.endpoint.node_id(), event_type);
+            let event = Event::new(self.endpoint.node_id(), remote, conn, event_type);
             crate::event::emit_event(event, self.endpoint().node_id(), &mut lock, conns)
         }
     }
@@ -404,16 +391,6 @@ pub struct Connections {
     pub accepted: ConnectionSet,
 }
 
-pub trait ManagedConnection {
-    fn stable_id(&self) -> u64;
-}
-
-impl ManagedConnection for Connection {
-    fn stable_id(&self) -> u64 {
-        Connection::stable_id(self) as u64
-    }
-}
-
 // impl Debug for Connections {
 //     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 //         let initiated = self
@@ -446,13 +423,13 @@ impl ConnectionSet {
         let conns = self.inner.entry((node_id, alpn)).or_default();
         const CONN_LIMIT: usize = 5;
         anyhow::ensure!(conns.len() <= CONN_LIMIT, "Connection limit exceeded");
-        conns.insert(conn.stable_id(), conn);
+        conns.insert(conn.shared_id(), conn);
         Ok(())
     }
 
     pub fn remove(&mut self, node_id: NodeId, alpn: Alpn, conn: &EchoConnection) {
         if let Entry::Occupied(mut entry) = self.inner.entry((node_id, alpn)) {
-            entry.get_mut().remove(&conn.stable_id());
+            entry.get_mut().remove(&conn.shared_id());
             if entry.get().is_empty() {
                 entry.remove();
             }

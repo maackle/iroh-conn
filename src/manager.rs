@@ -4,7 +4,7 @@
 use anyhow::Result;
 use iroh::{NodeAddr, endpoint::Connection};
 
-use crate::basic::ManagedConnection;
+use crate::handler::ManagedConnection;
 
 #[async_trait::async_trait]
 pub trait ConnectionManager<C: ManagedConnection> {

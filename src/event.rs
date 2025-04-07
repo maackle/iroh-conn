@@ -4,12 +4,14 @@ use iroh::{NodeId, endpoint::StreamId};
 use polestar::id::IdMap;
 use tokio::sync::Mutex;
 
-use crate::basic::Connections;
+use crate::matheus::Connections;
 
 #[derive(Debug)]
 pub struct Event<N, C, S> {
     node: N,
-    event: EventType<N, C, S>,
+    remote: N,
+    conn: C,
+    event: EventType<S>,
 }
 
 pub type EventSystem = Event<NodeId, u64, iroh::endpoint::StreamId>;
@@ -23,196 +25,156 @@ where
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let node = &self.node;
+        let to = &self.remote;
+        let conn = &self.conn;
         match &self.event {
-            EventType::OpenConnection { to, conn } => {
+            EventType::OpenConnection => {
                 write!(f, "{:>16} : {node} -> {to} : {conn}", "OpenConnection")
             }
-            EventType::AcceptConnection { from, conn } => {
-                write!(f, "{:>16} : {node} <- {from} : {conn}", "AcceptConnection")
+            EventType::AcceptConnection => {
+                write!(f, "{:>16} : {node} <- {to} : {conn}", "AcceptConnection")
             }
-            EventType::CloseConnection { to, conn } => {
+            EventType::CloseConnection => {
                 write!(f, "{:>16} : {node} xx {to} : {conn}", "CloseConnection")
             }
-            EventType::OpenStream { to, conn, stream } => {
+            EventType::OpenStream { stream } => {
                 write!(
                     f,
                     "{:>16} : {node} ~> {to} : {conn} . {stream}",
                     "OpenStream"
                 )
             }
-            EventType::AcceptStream { from, conn, stream } => {
+            EventType::ReadStream { stream } => {
                 write!(
                     f,
-                    "{:>16} : {node} <~ {from} : {conn} . {stream}",
+                    "{:>16} : {node} ~~ {to} : {conn} . {stream}",
+                    "ReadStream"
+                )
+            }
+            EventType::WriteStream { stream } => {
+                write!(
+                    f,
+                    "{:>16} : {node} ~~ {to} : {conn} . {stream}",
+                    "WriteStream"
+                )
+            }
+            EventType::FinishStream { stream } => {
+                write!(
+                    f,
+                    "{:>16} : {node} ~~ {to} : {conn} . {stream}",
+                    "FinishStream"
+                )
+            }
+            EventType::AcceptStream { stream } => {
+                write!(
+                    f,
+                    "{:>16} : {node} <~ {to} : {conn} . {stream}",
                     "AcceptStream"
                 )
             }
-            EventType::EndStream { to, conn, stream } => {
+            EventType::EndStream { stream } => {
                 write!(
                     f,
                     "{:>16} : {node} xx {to} : {conn} . {stream}",
                     "EndStream"
                 )
             }
-            EventType::Error { to, conn, err } => {
+            EventType::Error { err } => {
                 write!(f, "{:>16} : {node} XX {to} : {conn} : {err}", "Error")
             }
         }
     }
 }
 impl<N, C, S> Event<N, C, S> {
-    pub fn new(node: impl Into<N>, event: EventType<impl Into<N>, C, S>) -> Self {
+    pub fn new(node: impl Into<N>, remote: impl Into<N>, conn: C, event: EventType<S>) -> Self {
         let node = node.into();
-        let event = event.map_nodes(Into::into);
-        Self { node, event }
+        let remote = remote.into();
+        Self {
+            node,
+            remote,
+            conn,
+            event,
+        }
     }
 }
 
-pub type EventTypeSystem = EventType<NodeId, u64, iroh::endpoint::StreamId>;
+pub type EventTypeSystem = EventType<iroh::endpoint::StreamId>;
 
 #[derive(Debug)]
-pub enum EventType<N, C, S> {
-    OpenConnection {
-        to: N,
-        conn: C,
-    },
-    AcceptConnection {
-        from: N,
-        conn: C,
-    },
-    CloseConnection {
-        to: N,
-        conn: C,
-    },
+pub enum EventType<S> {
+    OpenConnection,
+    AcceptConnection,
+    CloseConnection,
     OpenStream {
-        to: N,
-        conn: C,
         stream: S,
     },
     AcceptStream {
-        from: N,
-        conn: C,
+        stream: S,
+    },
+    WriteStream {
+        stream: S,
+    },
+    ReadStream {
+        stream: S,
+    },
+    FinishStream {
         stream: S,
     },
     EndStream {
-        to: N,
-        conn: C,
         stream: S,
     },
 
     Error {
-        to: N,
-        conn: C,
         // stream: Option<S>,
         err: String,
     },
 }
 
-impl<N, C, S> EventType<N, C, S> {
-    pub fn map_nodes<X>(self, mut f: impl FnMut(N) -> X) -> EventType<X, C, S> {
-        match self {
-            EventType::OpenConnection { to, conn } => EventType::OpenConnection { to: f(to), conn },
-            EventType::AcceptConnection { from, conn } => EventType::AcceptConnection {
-                from: f(from),
-                conn,
-            },
-            EventType::CloseConnection { to, conn } => {
-                EventType::CloseConnection { to: f(to), conn }
-            }
-            EventType::OpenStream { to, conn, stream } => EventType::OpenStream {
-                to: f(to),
-                conn,
-                stream,
-            },
-            EventType::AcceptStream { from, conn, stream } => EventType::AcceptStream {
-                from: f(from),
-                conn,
-                stream,
-            },
-            EventType::EndStream { to, conn, stream } => EventType::EndStream {
-                to: f(to),
-                conn,
-                stream,
-            },
-            EventType::Error { to, conn, err } => EventType::Error {
-                to: f(to),
-                conn,
-                err,
-            },
+impl<N, C, S> Event<N, C, S> {
+    pub fn map_nodes<X>(mut self, mut f: impl FnMut(N) -> X) -> Event<X, C, S> {
+        let node = f(self.node);
+        let remote = f(self.remote);
+        Event {
+            node,
+            remote,
+            conn: self.conn,
+            event: self.event,
         }
     }
 
-    pub fn map_conns<X>(self, mut f: impl FnMut(C) -> X) -> EventType<N, X, S> {
-        match self {
-            EventType::OpenConnection { to, conn } => {
-                EventType::OpenConnection { to, conn: f(conn) }
-            }
-            EventType::AcceptConnection { from, conn } => EventType::AcceptConnection {
-                from,
-                conn: f(conn),
-            },
-            EventType::CloseConnection { to, conn } => {
-                EventType::CloseConnection { to, conn: f(conn) }
-            }
-            EventType::OpenStream { to, conn, stream } => EventType::OpenStream {
-                to,
-                conn: f(conn),
-                stream,
-            },
-            EventType::AcceptStream { from, conn, stream } => EventType::AcceptStream {
-                from,
-                conn: f(conn),
-                stream,
-            },
-            EventType::EndStream { to, conn, stream } => EventType::EndStream {
-                to,
-                conn: f(conn),
-                stream,
-            },
-            EventType::Error { to, conn, err } => EventType::Error {
-                to,
-                conn: f(conn),
-                err,
-            },
+    pub fn map_conns<X>(self, mut f: impl FnMut(C) -> X) -> Event<N, X, S> {
+        let conn = f(self.conn);
+        Event {
+            node: self.node,
+            remote: self.remote,
+            conn,
+            event: self.event,
         }
     }
 
-    pub fn map_streams<X>(self, mut f: impl FnMut(S) -> X) -> EventType<N, C, X> {
-        match self {
-            EventType::OpenConnection { to, conn } => EventType::OpenConnection { to, conn },
-            EventType::AcceptConnection { from, conn } => {
-                EventType::AcceptConnection { from, conn }
-            }
-            EventType::CloseConnection { to, conn } => EventType::CloseConnection { to, conn },
-            EventType::OpenStream { to, conn, stream } => EventType::OpenStream {
-                to,
-                conn,
-                stream: f(stream),
-            },
-            EventType::AcceptStream { from, conn, stream } => EventType::AcceptStream {
-                from,
-                conn,
-                stream: f(stream),
-            },
-            EventType::EndStream { to, conn, stream } => EventType::EndStream {
-                to,
-                conn,
-                stream: f(stream),
-            },
-            EventType::Error { to, conn, err } => EventType::Error { to, conn, err },
+    pub fn map_streams<X>(self, mut f: impl FnMut(S) -> X) -> Event<N, C, X> {
+        let event = match self.event {
+            EventType::OpenConnection => EventType::OpenConnection,
+            EventType::AcceptConnection => EventType::AcceptConnection,
+            EventType::CloseConnection => EventType::CloseConnection,
+            EventType::OpenStream { stream } => EventType::OpenStream { stream: f(stream) },
+            EventType::AcceptStream { stream } => EventType::AcceptStream { stream: f(stream) },
+            EventType::WriteStream { stream } => EventType::WriteStream { stream: f(stream) },
+            EventType::ReadStream { stream } => EventType::ReadStream { stream: f(stream) },
+            EventType::FinishStream { stream } => EventType::FinishStream { stream: f(stream) },
+            EventType::EndStream { stream } => EventType::EndStream { stream: f(stream) },
+            EventType::Error { err } => EventType::Error { err },
+        };
+        Event {
+            node: self.node,
+            remote: self.remote,
+            conn: self.conn,
+            event,
         }
     }
 
     pub fn remote(&self) -> &N {
-        match self {
-            EventType::OpenConnection { to, .. } => to,
-            EventType::AcceptConnection { from, .. } => from,
-            EventType::CloseConnection { to, .. } => to,
-            EventType::OpenStream { to, .. } => to,
-            EventType::AcceptStream { from, .. } => from,
-            EventType::EndStream { to, .. } => to,
-            EventType::Error { to, .. } => to,
-        }
+        &self.remote
     }
 }
 
@@ -282,15 +244,11 @@ pub struct EventMapping {
 
 impl EventMapping {
     pub fn apply(&mut self, event: EventSystem) -> EventModel {
-        assert_ne!(event.node, *event.event.remote(), "{event:?}");
-        Event {
-            node: self.nodes.lookup(event.node).unwrap(),
-            event: event
-                .event
-                .map_nodes(|node| self.nodes.lookup(node).unwrap())
-                .map_conns(|conn| self.conns.lookup(conn).unwrap())
-                .map_streams(|stream| self.streams.lookup(stream).unwrap()),
-        }
+        assert_ne!(event.node, *event.remote(), "{event:?}");
+        event
+            .map_nodes(|node| self.nodes.lookup(node).unwrap())
+            .map_conns(|conn| self.conns.lookup(conn).unwrap())
+            .map_streams(|stream| self.streams.lookup(stream).unwrap())
     }
 
     pub(crate) fn print_info(&mut self, node_id: NodeId, conns: &Connections) {
@@ -324,8 +282,6 @@ pub fn emit_event(
 ) {
     let event = lock.apply(event);
     println!("{}", event);
-
-    return;
 
     if let Some(conns) = conns {
         println!();

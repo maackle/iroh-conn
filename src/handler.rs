@@ -7,8 +7,6 @@ use iroh::{
 };
 use n0_future::FutureExt;
 
-use super::ManagedConnection;
-
 /// The ConnectionHandler trait describes how to open connections,
 /// and what to do with connections once they are established.
 pub trait ConnectionHandler<C: ManagedConnection>: Send + Sync + 'static {
@@ -59,3 +57,13 @@ pub trait ConnectionHandler<C: ManagedConnection>: Send + Sync + 'static {
 //         async move { Ok(()) }.boxed()
 //     }
 // }
+
+pub trait ManagedConnection {
+    fn shared_id(&self) -> u64;
+}
+
+impl ManagedConnection for Connection {
+    fn shared_id(&self) -> u64 {
+        Connection::stable_id(self) as u64
+    }
+}

@@ -1,9 +1,10 @@
 use std::{sync::Arc, time::Duration};
 
 use crate::{
-    ConnectionManager,
-    basic::{BasicConnectionManager, ConnectionHandler, ManagedConnection},
+    ConnectionHandler, ConnectionManager,
     event::{Event, EventMappingShared, EventType},
+    handler::ManagedConnection,
+    matheus::BasicConnectionManager,
     testing::discover,
 };
 use anyhow::{Context, Result};
@@ -75,11 +76,9 @@ impl TestNode {
         let (mut send, mut recv) = conn.open_bi().await?;
         self.manager
             .emit_event(
-                EventType::OpenStream {
-                    to: n.endpoint().node_id(),
-                    conn: conn.stable_id(),
-                    stream: send.id(),
-                },
+                n.endpoint().node_id(),
+                conn.shared_id(),
+                EventType::OpenStream { stream: send.id() },
                 None,
             )
             .await;
@@ -87,19 +86,44 @@ impl TestNode {
         tracing::debug!(send = ?send.id(), recv = ?recv.id(), "[caller]");
         send.write_all(msg).await?;
         tracing::debug!("[caller] wrote data: {}", std::str::from_utf8(msg)?);
+        self.manager
+            .emit_event(
+                n.endpoint().node_id(),
+                conn.shared_id(),
+                EventType::WriteStream { stream: send.id() },
+                None,
+            )
+            .await;
+
         send.finish()?;
         tracing::debug!("[caller] finished sending");
+        self.manager
+            .emit_event(
+                n.endpoint().node_id(),
+                conn.shared_id(),
+                EventType::FinishStream { stream: send.id() },
+                None,
+            )
+            .await;
+
         let response = recv.read_to_end(10_000).await?;
         tracing::info!("[caller] DONE");
+        self.manager
+            .emit_event(
+                n.endpoint().node_id(),
+                conn.shared_id(),
+                EventType::ReadStream { stream: send.id() },
+                None,
+            )
+            .await;
+
         assert_eq!(msg, &response);
 
         self.manager
             .emit_event(
-                EventType::EndStream {
-                    to: n.endpoint().node_id(),
-                    conn: conn.stable_id(),
-                    stream: send.id(),
-                },
+                n.endpoint().node_id(),
+                conn.shared_id(),
+                EventType::EndStream { stream: send.id() },
                 None,
             )
             .await;
@@ -126,11 +150,9 @@ impl TestNode {
                 {
                     self.manager
                         .emit_event(
-                            EventType::Error {
-                                to: n.endpoint().node_id(),
-                                conn: conn.stable_id(),
-                                err: e.to_string(),
-                            },
+                            n.endpoint().node_id(),
+                            conn.shared_id(),
+                            EventType::Error { err: e.to_string() },
                             None,
                         )
                         .await;
@@ -138,7 +160,7 @@ impl TestNode {
                     let mut ev = self.manager.events.as_ref().unwrap().lock().await;
                     let i = ev.nodes.lookup(self.endpoint().node_id()).unwrap();
                     let j = ev.nodes.lookup(n.endpoint().node_id()).unwrap();
-                    let c = ev.conns.lookup(conn.stable_id()).unwrap();
+                    let c = ev.conns.lookup(conn.shared_id()).unwrap();
                     Err(anyhow::anyhow!("rpc error: {e}, {i} -/-> {j} : {c}"))
                 }
 
@@ -192,7 +214,7 @@ pub struct EchoConnection {
 }
 
 impl ManagedConnection for EchoConnection {
-    fn stable_id(&self) -> u64 {
+    fn shared_id(&self) -> u64 {
         self.id
     }
 }
@@ -253,18 +275,21 @@ impl ConnectionHandler<EchoConnection> for EchoHandler {
 
             tokio::spawn(async move {
                 while let Ok((mut send, mut recv)) = conn.accept_bi().await {
-                    if let Some(mapping) = mapping.clone() {
-                        let mut lock = mapping.lock().await;
-                        let event = Event::new(
-                            node_id,
-                            EventType::AcceptStream {
-                                from: conn.remote_node_id().unwrap(),
-                                conn: conn.stable_id(),
-                                stream: send.id(),
-                            },
-                        );
-                        crate::event::emit_event(event, node_id, &mut lock, None);
-                    }
+                    let mapping = mapping.clone();
+                    let emit = |event_type| async {
+                        if let Some(mapping) = mapping.clone() {
+                            let mut lock = mapping.lock().await;
+                            let event = Event::new(
+                                node_id,
+                                conn.remote_node_id().unwrap(),
+                                conn.shared_id(),
+                                event_type,
+                            );
+                            crate::event::emit_event(event, node_id, &mut lock, None);
+                        }
+                    };
+
+                    emit(EventType::AcceptStream { stream: send.id() }).await;
 
                     tracing::info!(send = ?send.id(), recv = ?recv.id(), "[accept] BEGIN");
 
@@ -272,27 +297,19 @@ impl ConnectionHandler<EchoConnection> for EchoHandler {
 
                     let buf = recv.read_to_end(10_000).await?;
                     tracing::info!("[accept] received msg {}", std::str::from_utf8(&buf)?);
+                    emit(EventType::ReadStream { stream: send.id() }).await;
 
                     send.write_all(&buf).await?;
                     tracing::info!("[accept] replied with msg {}", std::str::from_utf8(&buf)?);
+                    emit(EventType::WriteStream { stream: send.id() }).await;
 
                     send.finish()?;
                     tracing::info!("[accept] DONE");
+                    emit(EventType::FinishStream { stream: send.id() }).await;
 
-                    if let Some(mapping) = mapping.clone() {
-                        let mut lock = mapping.lock().await;
-                        let event = Event::new(
-                            node_id,
-                            EventType::EndStream {
-                                to: conn.remote_node_id().unwrap(),
-                                conn: conn.stable_id(),
-                                stream: send.id(),
-                            },
-                        );
-                        crate::event::emit_event(event, node_id, &mut lock, None);
-                    }
+                    emit(EventType::EndStream { stream: send.id() }).await;
                 }
-                tracing::info!("handler loop for conn {} closing", conn.stable_id());
+                tracing::info!("handler loop for conn {} closing", conn.shared_id());
                 anyhow::Ok(())
             });
 

@@ -1,5 +1,8 @@
-pub mod basic;
+mod handler;
+pub use handler::ConnectionHandler;
+
 mod manager;
+pub mod matheus;
 
 #[cfg(feature = "modeling")]
 pub mod event;
