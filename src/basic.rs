@@ -17,7 +17,7 @@ use tracing::{Instrument, info_span};
 
 use crate::{
     Alpn, ConnectionManager,
-    event::{Event, EventMappingShared, EventType},
+    event::{Event, EventMappingShared, EventType, EventTypeSystem},
     testing::EchoConnection,
 };
 
@@ -149,6 +149,7 @@ impl ConnectionManager<EchoConnection> for BasicConnectionManager {
                 }
             }
         };
+        // tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         Ok(conn)
     }
@@ -156,6 +157,8 @@ impl ConnectionManager<EchoConnection> for BasicConnectionManager {
     async fn handle_incoming_connection(&self, conn: Connection) -> Result<()> {
         tracing::debug!(conn = conn.stable_id(), "handling incoming connection");
         let remote_node_id = conn.remote_node_id()?;
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         let alpn = conn
             .alpn()
@@ -357,11 +360,7 @@ impl BasicConnectionManager {
             .clone())
     }
 
-    pub async fn emit_event(
-        &self,
-        event_type: EventType<NodeId, u64>,
-        conns: Option<&Connections>,
-    ) {
+    pub async fn emit_event(&self, event_type: EventTypeSystem, conns: Option<&Connections>) {
         if let Some(events) = &self.events {
             let mut lock = events.lock().await;
             let event = Event::new(self.endpoint.node_id(), event_type);

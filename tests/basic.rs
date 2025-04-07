@@ -18,7 +18,7 @@ async fn test_two_simultaneous() -> Result<()> {
 
     println!("\nfirst:\n");
     // First simultaneous call fails
-    TestNode::rpc_cycle([&n1, &n2], b"hello").await.unwrap_err();
+    TestNode::rpc_cycle([&n1, &n2], b"hello").await.unwrap();
 
     println!("\nsecond:\n");
     // Second simultaneous call succeeds

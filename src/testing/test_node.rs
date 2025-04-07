@@ -15,7 +15,6 @@ use iroh::{
     Endpoint, NodeId,
     endpoint::{ConnectOptions, Connection, TransportConfig, VarInt},
 };
-use n0_future::future::Boxed;
 
 pub const ALPN_ECHO: &[u8] = b"test/echo";
 
@@ -79,6 +78,7 @@ impl TestNode {
                 EventType::OpenStream {
                     to: n.endpoint().node_id(),
                     conn: conn.stable_id(),
+                    stream: send.id(),
                 },
                 None,
             )
@@ -98,6 +98,7 @@ impl TestNode {
                 EventType::EndStream {
                     to: n.endpoint().node_id(),
                     conn: conn.stable_id(),
+                    stream: send.id(),
                 },
                 None,
             )
@@ -123,6 +124,17 @@ impl TestNode {
             Err(e) => {
                 #[cfg(feature = "modeling")]
                 {
+                    self.manager
+                        .emit_event(
+                            EventType::Error {
+                                to: n.endpoint().node_id(),
+                                conn: conn.stable_id(),
+                                err: e.to_string(),
+                            },
+                            None,
+                        )
+                        .await;
+
                     let mut ev = self.manager.events.as_ref().unwrap().lock().await;
                     let i = ev.nodes.lookup(self.endpoint().node_id()).unwrap();
                     let j = ev.nodes.lookup(n.endpoint().node_id()).unwrap();
@@ -147,7 +159,6 @@ impl TestNode {
         for i in 0..num {
             let j = (i + 1) % num;
             let n = ns[i].clone();
-            let m = ns[j].clone();
             let m = ns[j].clone();
             calls.push(async move { n.rpc(&m, msg).await });
         }
@@ -198,7 +209,7 @@ impl ConnectionHandler<EchoConnection> for EchoHandler {
 
     fn confirm(
         &self,
-        node_id: NodeId,
+        _node_id: NodeId,
         conn: Connection,
         initiated: bool,
     ) -> BoxFuture<'static, Result<EchoConnection>> {
@@ -233,7 +244,7 @@ impl ConnectionHandler<EchoConnection> for EchoHandler {
         &self,
         node_id: NodeId,
         conn: EchoConnection,
-        initiated: bool,
+        _initiated: bool,
     ) -> BoxFuture<'static, Result<EchoConnection>> {
         let mapping = self.0.clone();
 
@@ -249,6 +260,7 @@ impl ConnectionHandler<EchoConnection> for EchoHandler {
                             EventType::AcceptStream {
                                 from: conn.remote_node_id().unwrap(),
                                 conn: conn.stable_id(),
+                                stream: send.id(),
                             },
                         );
                         crate::event::emit_event(event, node_id, &mut lock, None);
@@ -274,6 +286,7 @@ impl ConnectionHandler<EchoConnection> for EchoHandler {
                             EventType::EndStream {
                                 to: conn.remote_node_id().unwrap(),
                                 conn: conn.stable_id(),
+                                stream: send.id(),
                             },
                         );
                         crate::event::emit_event(event, node_id, &mut lock, None);

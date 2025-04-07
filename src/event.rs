@@ -1,21 +1,25 @@
 use std::{iter::repeat, sync::Arc};
 
-use iroh::NodeId;
+use iroh::{NodeId, endpoint::StreamId};
 use polestar::id::IdMap;
 use tokio::sync::Mutex;
 
 use crate::basic::Connections;
 
 #[derive(Debug)]
-pub struct Event<N, C> {
+pub struct Event<N, C, S> {
     node: N,
-    event: EventType<N, C>,
+    event: EventType<N, C, S>,
 }
 
-impl<N, C> std::fmt::Display for Event<N, C>
+pub type EventSystem = Event<NodeId, u64, iroh::endpoint::StreamId>;
+pub type EventModel = Event<Nid, Cid, Sid>;
+
+impl<N, C, S> std::fmt::Display for Event<N, C, S>
 where
     N: std::fmt::Display,
     C: std::fmt::Display,
+    S: std::fmt::Display,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let node = &self.node;
@@ -29,38 +33,83 @@ where
             EventType::CloseConnection { to, conn } => {
                 write!(f, "{:>16} : {node} xx {to} : {conn}", "CloseConnection")
             }
-            EventType::OpenStream { to, conn } => {
-                write!(f, "{:>16} : {node} ~> {to} : {conn}", "OpenStream")
+            EventType::OpenStream { to, conn, stream } => {
+                write!(
+                    f,
+                    "{:>16} : {node} ~> {to} : {conn} . {stream}",
+                    "OpenStream"
+                )
             }
-            EventType::AcceptStream { from, conn } => {
-                write!(f, "{:>16} : {node} <~ {from} : {conn}", "AcceptStream")
+            EventType::AcceptStream { from, conn, stream } => {
+                write!(
+                    f,
+                    "{:>16} : {node} <~ {from} : {conn} . {stream}",
+                    "AcceptStream"
+                )
             }
-            EventType::EndStream { to, conn } => {
-                write!(f, "{:>16} : {node} xx {to} : {conn}", "EndStream")
+            EventType::EndStream { to, conn, stream } => {
+                write!(
+                    f,
+                    "{:>16} : {node} xx {to} : {conn} . {stream}",
+                    "EndStream"
+                )
+            }
+            EventType::Error { to, conn, err } => {
+                write!(f, "{:>16} : {node} XX {to} : {conn} : {err}", "Error")
             }
         }
     }
 }
-impl<N, C> Event<N, C> {
-    pub fn new(node: impl Into<N>, event: EventType<impl Into<N>, C>) -> Self {
+impl<N, C, S> Event<N, C, S> {
+    pub fn new(node: impl Into<N>, event: EventType<impl Into<N>, C, S>) -> Self {
         let node = node.into();
         let event = event.map_nodes(Into::into);
         Self { node, event }
     }
 }
 
+pub type EventTypeSystem = EventType<NodeId, u64, iroh::endpoint::StreamId>;
+
 #[derive(Debug)]
-pub enum EventType<N, C> {
-    OpenConnection { to: N, conn: C },
-    AcceptConnection { from: N, conn: C },
-    CloseConnection { to: N, conn: C },
-    OpenStream { to: N, conn: C },
-    AcceptStream { from: N, conn: C },
-    EndStream { to: N, conn: C },
+pub enum EventType<N, C, S> {
+    OpenConnection {
+        to: N,
+        conn: C,
+    },
+    AcceptConnection {
+        from: N,
+        conn: C,
+    },
+    CloseConnection {
+        to: N,
+        conn: C,
+    },
+    OpenStream {
+        to: N,
+        conn: C,
+        stream: S,
+    },
+    AcceptStream {
+        from: N,
+        conn: C,
+        stream: S,
+    },
+    EndStream {
+        to: N,
+        conn: C,
+        stream: S,
+    },
+
+    Error {
+        to: N,
+        conn: C,
+        // stream: Option<S>,
+        err: String,
+    },
 }
 
-impl<N, C> EventType<N, C> {
-    pub fn map_nodes<M>(self, mut f: impl FnMut(N) -> M) -> EventType<M, C> {
+impl<N, C, S> EventType<N, C, S> {
+    pub fn map_nodes<X>(self, mut f: impl FnMut(N) -> X) -> EventType<X, C, S> {
         match self {
             EventType::OpenConnection { to, conn } => EventType::OpenConnection { to: f(to), conn },
             EventType::AcceptConnection { from, conn } => EventType::AcceptConnection {
@@ -70,16 +119,30 @@ impl<N, C> EventType<N, C> {
             EventType::CloseConnection { to, conn } => {
                 EventType::CloseConnection { to: f(to), conn }
             }
-            EventType::OpenStream { to, conn } => EventType::OpenStream { to: f(to), conn },
-            EventType::AcceptStream { from, conn } => EventType::AcceptStream {
+            EventType::OpenStream { to, conn, stream } => EventType::OpenStream {
+                to: f(to),
+                conn,
+                stream,
+            },
+            EventType::AcceptStream { from, conn, stream } => EventType::AcceptStream {
                 from: f(from),
                 conn,
+                stream,
             },
-            EventType::EndStream { to, conn } => EventType::EndStream { to: f(to), conn },
+            EventType::EndStream { to, conn, stream } => EventType::EndStream {
+                to: f(to),
+                conn,
+                stream,
+            },
+            EventType::Error { to, conn, err } => EventType::Error {
+                to: f(to),
+                conn,
+                err,
+            },
         }
     }
 
-    pub fn map_conns<D>(self, mut f: impl FnMut(C) -> D) -> EventType<N, D> {
+    pub fn map_conns<X>(self, mut f: impl FnMut(C) -> X) -> EventType<N, X, S> {
         match self {
             EventType::OpenConnection { to, conn } => {
                 EventType::OpenConnection { to, conn: f(conn) }
@@ -91,12 +154,52 @@ impl<N, C> EventType<N, C> {
             EventType::CloseConnection { to, conn } => {
                 EventType::CloseConnection { to, conn: f(conn) }
             }
-            EventType::OpenStream { to, conn } => EventType::OpenStream { to, conn: f(conn) },
-            EventType::AcceptStream { from, conn } => EventType::AcceptStream {
+            EventType::OpenStream { to, conn, stream } => EventType::OpenStream {
+                to,
+                conn: f(conn),
+                stream,
+            },
+            EventType::AcceptStream { from, conn, stream } => EventType::AcceptStream {
                 from,
                 conn: f(conn),
+                stream,
             },
-            EventType::EndStream { to, conn } => EventType::EndStream { to, conn: f(conn) },
+            EventType::EndStream { to, conn, stream } => EventType::EndStream {
+                to,
+                conn: f(conn),
+                stream,
+            },
+            EventType::Error { to, conn, err } => EventType::Error {
+                to,
+                conn: f(conn),
+                err,
+            },
+        }
+    }
+
+    pub fn map_streams<X>(self, mut f: impl FnMut(S) -> X) -> EventType<N, C, X> {
+        match self {
+            EventType::OpenConnection { to, conn } => EventType::OpenConnection { to, conn },
+            EventType::AcceptConnection { from, conn } => {
+                EventType::AcceptConnection { from, conn }
+            }
+            EventType::CloseConnection { to, conn } => EventType::CloseConnection { to, conn },
+            EventType::OpenStream { to, conn, stream } => EventType::OpenStream {
+                to,
+                conn,
+                stream: f(stream),
+            },
+            EventType::AcceptStream { from, conn, stream } => EventType::AcceptStream {
+                from,
+                conn,
+                stream: f(stream),
+            },
+            EventType::EndStream { to, conn, stream } => EventType::EndStream {
+                to,
+                conn,
+                stream: f(stream),
+            },
+            EventType::Error { to, conn, err } => EventType::Error { to, conn, err },
         }
     }
 
@@ -108,6 +211,7 @@ impl<N, C> EventType<N, C> {
             EventType::OpenStream { to, .. } => to,
             EventType::AcceptStream { from, .. } => from,
             EventType::EndStream { to, .. } => to,
+            EventType::Error { to, .. } => to,
         }
     }
 }
@@ -146,27 +250,46 @@ impl polestar::id::Id for Nid {}
 )]
 #[display("c{_0}")]
 #[debug("c{_0}")]
-pub struct ConId(usize);
+pub struct Cid(usize);
+impl polestar::id::Id for Cid {}
 
-impl polestar::id::Id for ConId {}
+#[derive(
+    Copy,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    derive_more::Display,
+    derive_more::Debug,
+    derive_more::Deref,
+    derive_more::From,
+)]
+#[display("s{_0}")]
+#[debug("s{_0}")]
+pub struct Sid(usize);
+impl polestar::id::Id for Sid {}
 
 pub type EventMappingShared = Option<Arc<Mutex<EventMapping>>>;
 
 #[derive(Default)]
 pub struct EventMapping {
     pub nodes: IdMap<NodeId, Nid>,
-    pub conns: IdMap<u64, ConId>,
+    pub conns: IdMap<u64, Cid>,
+    pub streams: IdMap<StreamId, Sid>,
 }
 
 impl EventMapping {
-    pub fn apply(&mut self, event: Event<NodeId, u64>) -> Event<Nid, ConId> {
+    pub fn apply(&mut self, event: EventSystem) -> EventModel {
         assert_ne!(event.node, *event.event.remote(), "{event:?}");
         Event {
             node: self.nodes.lookup(event.node).unwrap(),
             event: event
                 .event
                 .map_nodes(|node| self.nodes.lookup(node).unwrap())
-                .map_conns(|conn| self.conns.lookup(conn).unwrap()),
+                .map_conns(|conn| self.conns.lookup(conn).unwrap())
+                .map_streams(|stream| self.streams.lookup(stream).unwrap()),
         }
     }
 
@@ -194,13 +317,16 @@ impl EventMapping {
 }
 
 pub fn emit_event(
-    event: Event<NodeId, u64>,
+    event: EventSystem,
     node_id: NodeId,
     lock: &mut EventMapping,
     conns: Option<&Connections>,
 ) {
     let event = lock.apply(event);
     println!("{}", event);
+
+    return;
+
     if let Some(conns) = conns {
         println!();
         lock.print_info(node_id, conns);
