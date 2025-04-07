@@ -1,10 +1,8 @@
-use std::{iter::repeat, sync::Arc};
+use std::sync::Arc;
 
 use iroh::{NodeId, endpoint::StreamId};
 use polestar::id::IdMap;
 use tokio::sync::Mutex;
-
-use crate::matheus::Connections;
 
 #[derive(Debug)]
 pub struct Event<N, C, S> {
@@ -131,7 +129,7 @@ pub enum EventType<S> {
 }
 
 impl<N, C, S> Event<N, C, S> {
-    pub fn map_nodes<X>(mut self, mut f: impl FnMut(N) -> X) -> Event<X, C, S> {
+    pub fn map_nodes<X>(self, mut f: impl FnMut(N) -> X) -> Event<X, C, S> {
         let node = f(self.node);
         let remote = f(self.remote);
         Event {
@@ -250,42 +248,9 @@ impl EventMapping {
             .map_conns(|conn| self.conns.lookup(conn).unwrap())
             .map_streams(|stream| self.streams.lookup(stream).unwrap())
     }
-
-    pub(crate) fn print_info(&mut self, node_id: NodeId, conns: &Connections) {
-        let node_id = self.nodes.lookup(node_id).unwrap();
-
-        let initiated = conns
-            .initiated
-            .iter()
-            .map(|((k, _), _)| self.nodes.lookup(*k).unwrap())
-            .collect::<Vec<_>>();
-
-        let accepted = conns
-            .accepted
-            .inner
-            .iter()
-            .flat_map(|((k, _), v)| repeat(self.nodes.lookup(*k).unwrap()).take(v.len()))
-            .collect::<Vec<_>>();
-
-        println!(
-            "CONNECTIONS {node_id} : initiated={:?}, accepted={:?}",
-            initiated, accepted
-        );
-    }
 }
 
-pub fn emit_event(
-    event: EventSystem,
-    node_id: NodeId,
-    lock: &mut EventMapping,
-    conns: Option<&Connections>,
-) {
+pub fn emit_event(event: EventSystem, lock: &mut EventMapping) {
     let event = lock.apply(event);
     println!("{}", event);
-
-    if let Some(conns) = conns {
-        println!();
-        lock.print_info(node_id, conns);
-        println!();
-    }
 }

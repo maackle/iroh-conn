@@ -79,7 +79,6 @@ impl TestNode {
                 n.endpoint().node_id(),
                 conn.shared_id(),
                 EventType::OpenStream { stream: send.id() },
-                None,
             )
             .await;
 
@@ -91,7 +90,6 @@ impl TestNode {
                 n.endpoint().node_id(),
                 conn.shared_id(),
                 EventType::WriteStream { stream: send.id() },
-                None,
             )
             .await;
 
@@ -102,7 +100,6 @@ impl TestNode {
                 n.endpoint().node_id(),
                 conn.shared_id(),
                 EventType::FinishStream { stream: send.id() },
-                None,
             )
             .await;
 
@@ -113,7 +110,6 @@ impl TestNode {
                 n.endpoint().node_id(),
                 conn.shared_id(),
                 EventType::ReadStream { stream: send.id() },
-                None,
             )
             .await;
 
@@ -124,7 +120,6 @@ impl TestNode {
                 n.endpoint().node_id(),
                 conn.shared_id(),
                 EventType::EndStream { stream: send.id() },
-                None,
             )
             .await;
 
@@ -153,7 +148,6 @@ impl TestNode {
                             n.endpoint().node_id(),
                             conn.shared_id(),
                             EventType::Error { err: e.to_string() },
-                            None,
                         )
                         .await;
 
@@ -285,7 +279,7 @@ impl ConnectionHandler<EchoConnection> for EchoHandler {
                                 conn.shared_id(),
                                 event_type,
                             );
-                            crate::event::emit_event(event, node_id, &mut lock, None);
+                            crate::event::emit_event(event, &mut lock);
                         }
                     };
 

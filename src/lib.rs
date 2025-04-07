@@ -2,6 +2,8 @@ mod handler;
 pub use handler::ConnectionHandler;
 
 mod manager;
+
+pub mod maackle;
 pub mod matheus;
 
 #[cfg(feature = "modeling")]

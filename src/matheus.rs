@@ -79,13 +79,8 @@ impl ConnectionManager<EchoConnection> for BasicConnectionManager {
                 tracing::trace!(conn = conn.shared_id(), "opened connection");
                 spot.insert(conn.clone());
 
-                self.emit_event(
-                    remote_node_id,
-                    conn.shared_id(),
-                    EventType::OpenConnection,
-                    Some(&conns),
-                )
-                .await;
+                self.emit_event(remote_node_id, conn.shared_id(), EventType::OpenConnection)
+                    .await;
 
                 tracing::debug!(
                     conn = conn.shared_id(),
@@ -190,7 +185,6 @@ impl ConnectionManager<EchoConnection> for BasicConnectionManager {
             remote_node_id,
             conn.shared_id(),
             EventType::AcceptConnection,
-            Some(&conns),
         )
         .await;
 
@@ -204,13 +198,8 @@ impl ConnectionManager<EchoConnection> for BasicConnectionManager {
                     Self::CLOSE_CONNECTION_SUPERSEDED_CODE.into(),
                     &Self::CLOSE_CONNECTION_SUPERSEDED_MSG,
                 );
-                self.emit_event(
-                    remote_node_id,
-                    conn.shared_id(),
-                    EventType::CloseConnection,
-                    Some(&conns),
-                )
-                .await;
+                self.emit_event(remote_node_id, conn.shared_id(), EventType::CloseConnection)
+                    .await;
             }
         }
 
@@ -341,17 +330,11 @@ impl BasicConnectionManager {
             .clone())
     }
 
-    pub async fn emit_event(
-        &self,
-        remote: NodeId,
-        conn: u64,
-        event_type: EventTypeSystem,
-        conns: Option<&Connections>,
-    ) {
+    pub async fn emit_event(&self, remote: NodeId, conn: u64, event_type: EventTypeSystem) {
         if let Some(events) = &self.events {
             let mut lock = events.lock().await;
             let event = Event::new(self.endpoint.node_id(), remote, conn, event_type);
-            crate::event::emit_event(event, self.endpoint().node_id(), &mut lock, conns)
+            crate::event::emit_event(event, &mut lock)
         }
     }
 
@@ -386,7 +369,7 @@ impl Drop for BasicConnectionManager {
 // Private
 
 #[derive(Debug, Default)]
-pub struct Connections {
+struct Connections {
     pub initiated: BTreeMap<(NodeId, Alpn), EchoConnection>,
     pub accepted: ConnectionSet,
 }
@@ -411,6 +394,28 @@ pub struct Connections {
 //             .field("accepted", &accepted)
 //             .finish()
 //     }
+// }
+
+// pub(crate) fn print_info(&mut self, node_id: NodeId, conns: &Connections) {
+//     let node_id = self.nodes.lookup(node_id).unwrap();
+
+//     let initiated = conns
+//         .initiated
+//         .iter()
+//         .map(|((k, _), _)| self.nodes.lookup(*k).unwrap())
+//         .collect::<Vec<_>>();
+
+//     let accepted = conns
+//         .accepted
+//         .inner
+//         .iter()
+//         .flat_map(|((k, _), v)| repeat(self.nodes.lookup(*k).unwrap()).take(v.len()))
+//         .collect::<Vec<_>>();
+
+//     println!(
+//         "CONNECTIONS {node_id} : initiated={:?}, accepted={:?}",
+//         initiated, accepted
+//     );
 // }
 
 #[derive(Debug, Default)]
