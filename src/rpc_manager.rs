@@ -32,7 +32,7 @@ use crate::{
 /// Unfortunately, it can't deduplicate connections to only a single one,
 /// as we need to rely on the remote end to close redundant connections.
 #[derive(derive_more::Debug)]
-pub struct BasicConnectionManager {
+pub struct RpcManager {
     endpoint: Endpoint,
     connections: Arc<Mutex<Connections>>,
 
@@ -49,7 +49,7 @@ pub struct BasicConnectionManager {
 }
 
 #[async_trait::async_trait]
-impl ConnectionManager<SharedConnection> for BasicConnectionManager {
+impl ConnectionManager<SharedConnection> for RpcManager {
     async fn get_or_open_connection(
         &self,
         remote_addr: impl Into<NodeAddr> + Clone + Send,
@@ -232,7 +232,7 @@ impl ConnectionManager<SharedConnection> for BasicConnectionManager {
     }
 }
 
-impl BasicConnectionManager {
+impl RpcManager {
     const CLOSE_CONNECTION_LIMIT_EXCEEDED_CODE: u32 = 10;
     const CLOSE_CONNECTION_LIMIT_EXCEEDED_MSG: &[u8] =
         b"ConnectionManager: Connection limit exceeded";
@@ -366,7 +366,7 @@ impl BasicConnectionManager {
     }
 }
 
-impl Drop for BasicConnectionManager {
+impl Drop for RpcManager {
     fn drop(&mut self) {
         self.cancel.cancel();
         // quinn Connections will close automatically when dropped.
@@ -401,28 +401,6 @@ struct Connections {
 //             .field("accepted", &accepted)
 //             .finish()
 //     }
-// }
-
-// pub(crate) fn print_info(&mut self, node_id: NodeId, conns: &Connections) {
-//     let node_id = self.nodes.lookup(node_id).unwrap();
-
-//     let initiated = conns
-//         .initiated
-//         .iter()
-//         .map(|((k, _), _)| self.nodes.lookup(*k).unwrap())
-//         .collect::<Vec<_>>();
-
-//     let accepted = conns
-//         .accepted
-//         .inner
-//         .iter()
-//         .flat_map(|((k, _), v)| repeat(self.nodes.lookup(*k).unwrap()).take(v.len()))
-//         .collect::<Vec<_>>();
-
-//     println!(
-//         "CONNECTIONS {node_id} : initiated={:?}, accepted={:?}",
-//         initiated, accepted
-//     );
 // }
 
 #[derive(Debug, Default)]

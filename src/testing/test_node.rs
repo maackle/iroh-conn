@@ -27,7 +27,7 @@ pub struct TestNode {
 
 impl TestNode {
     pub async fn new(
-        handler: impl ConnectionHandler<EchoConnection>,
+        handler: impl ConnectionHandler<SharedConnection>,
         alpns: impl IntoIterator<Item = Vec<u8>>,
         mapping: EventMappingShared,
     ) -> Result<Self> {
@@ -39,7 +39,7 @@ impl TestNode {
     }
 
     pub async fn cluster<const N: usize>(
-        handler: impl ConnectionHandler<EchoConnection> + Clone,
+        handler: impl ConnectionHandler<SharedConnection> + Clone,
         alpns: impl IntoIterator<Item = Vec<u8>>,
         mapping: EventMappingShared,
     ) -> Result<[Self; N]> {
@@ -65,14 +65,14 @@ impl TestNode {
     }
 
     #[tracing::instrument(skip_all, fields(node = self.endpoint().node_id().fmt_short(), remote = n.endpoint().node_id().fmt_short()))]
-    pub async fn connect(&self, n: &Self, alpn: &[u8]) -> Result<EchoConnection> {
+    pub async fn connect(&self, n: &Self, alpn: &[u8]) -> Result<SharedConnection> {
         let conn = self
             .get_or_open_connection(n.manager.endpoint().node_id(), alpn)
             .await?;
         Ok(conn)
     }
 
-    async fn rpc_inner(&self, n: &Self, msg: &[u8], conn: EchoConnection) -> Result<Vec<u8>> {
+    async fn rpc_inner(&self, n: &Self, msg: &[u8], conn: SharedConnection) -> Result<Vec<u8>> {
         let (mut send, mut recv) = conn.open_bi().await?;
         self.manager
             .emit_event(
@@ -200,20 +200,20 @@ const ECHO_DELAY: Duration = Duration::from_millis(100);
 pub struct EchoHandler(EventMappingShared);
 
 #[derive(Clone, Debug, derive_more::Deref, derive_more::Constructor)]
-pub struct EchoConnection {
+pub struct SharedConnection {
     pub id: u64,
 
     #[deref]
     pub conn: Connection,
 }
 
-impl ManagedConnection for EchoConnection {
+impl ManagedConnection for SharedConnection {
     fn shared_id(&self) -> u64 {
         self.id
     }
 }
 
-impl ConnectionHandler<EchoConnection> for EchoHandler {
+impl ConnectionHandler<SharedConnection> for EchoHandler {
     fn connect_options(&self) -> ConnectOptions {
         // 1 second idle timeout for these tests
         ConnectOptions::new().with_transport_config({
@@ -228,7 +228,7 @@ impl ConnectionHandler<EchoConnection> for EchoHandler {
         _node_id: NodeId,
         conn: Connection,
         initiated: bool,
-    ) -> BoxFuture<'static, Result<EchoConnection>> {
+    ) -> BoxFuture<'static, Result<SharedConnection>> {
         async move {
             if conn.alpn() != Some(ALPN_ECHO.to_vec()) {
                 anyhow::bail!("expected ALPN {:?}, got {:?}", ALPN_ECHO, conn.alpn());
@@ -237,7 +237,7 @@ impl ConnectionHandler<EchoConnection> for EchoHandler {
             let conn = if initiated {
                 let id = conn.stable_id() as u64;
                 conn.open_uni().await?.write_all(&id.to_be_bytes()).await?;
-                EchoConnection {
+                SharedConnection {
                     conn: conn.clone(),
                     id,
                 }
@@ -245,7 +245,7 @@ impl ConnectionHandler<EchoConnection> for EchoHandler {
                 let mut buf = [0; size_of::<u64>()];
                 conn.accept_uni().await?.read_exact(&mut buf).await?;
                 let id = u64::from_be_bytes(buf);
-                EchoConnection {
+                SharedConnection {
                     conn: conn.clone(),
                     id,
                 }
@@ -259,9 +259,9 @@ impl ConnectionHandler<EchoConnection> for EchoHandler {
     fn handle(
         &self,
         node_id: NodeId,
-        conn: EchoConnection,
+        conn: SharedConnection,
         _initiated: bool,
-    ) -> BoxFuture<'static, Result<EchoConnection>> {
+    ) -> BoxFuture<'static, Result<SharedConnection>> {
         let mapping = self.0.clone();
 
         async move {
