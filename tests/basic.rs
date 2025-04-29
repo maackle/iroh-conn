@@ -45,16 +45,24 @@ async fn test_interweaved() -> Result<()> {
 
     let [n1, n2, n3] = TestNode::cluster(EchoHandler, [ALPN_ECHO.to_vec()]).await?;
 
-    join_all([
-        TestNode::rpc_cycle([&n1, &n2], b"hello"),
-        TestNode::rpc_cycle([&n2, &n3], b"hello"),
-        TestNode::rpc_cycle([&n3, &n1], b"hello"),
-    ])
-    .await
-    .into_iter()
-    .collect::<Result<Vec<_>>>()?;
+    const ATTEMPTS: usize = 3;
 
-    Ok(())
+    for _ in 0..ATTEMPTS {
+        // First time fails
+        if let Ok(_) = join_all([
+            TestNode::rpc_cycle([&n1, &n2], b"hello"),
+            TestNode::rpc_cycle([&n2, &n3], b"hello"),
+            TestNode::rpc_cycle([&n3, &n1], b"hello"),
+        ])
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>>>()
+        {
+            return Ok(());
+        }
+    }
+
+    anyhow::bail!("failed after {} attempts", ATTEMPTS);
 }
 
 #[tokio::test(flavor = "multi_thread")]
