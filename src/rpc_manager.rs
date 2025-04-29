@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::Result;
 use iroh::{Endpoint, NodeAddr, NodeId, endpoint::Connection};
-use n0_future::task;
+use n0_future::{Either, task};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info_span};
@@ -35,6 +35,7 @@ use crate::{
 pub struct RpcManager {
     endpoint: Endpoint,
     connections: Arc<Mutex<Connections>>,
+    alpns: Vec<Alpn>,
 
     #[debug(skip)]
     handlers: Mutex<BTreeMap<Alpn, Arc<dyn ConnectionHandler<SharedConnection>>>>,
@@ -55,21 +56,18 @@ impl ConnectionManager<SharedConnection> for RpcManager {
         remote_addr: impl Into<NodeAddr> + Clone + Send,
         alpn: &[u8],
     ) -> Result<SharedConnection> {
+        if !self.alpns.contains(&alpn.to_vec()) {
+            anyhow::bail!("ALPN not accepted by this manager: {:?}", alpn);
+        }
+
         let remote_addr = remote_addr.into();
         let remote_node_id = remote_addr.node_id;
 
         let mut conns = self.connections.lock().await;
 
-        let Connections {
-            initiated,
-            accepted,
-        } = &mut *conns;
-        let initiated_conn = initiated.entry((remote_node_id, alpn.to_vec()));
-        // If we already have an accepted connection & prefer that, reuse that one
-        let accepted_conns = accepted.get_conns(remote_node_id, alpn.to_vec());
-        let conn = match (initiated_conn, accepted_conns) {
+        let conn = match conns.entry(remote_node_id) {
             // No connection open for this - need to open a new connection
-            (Entry::Vacant(spot), Entry::Vacant(_)) => {
+            Entry::Vacant(spot) => {
                 tracing::trace!(
                     "opening new connection... {} -> {}",
                     self.endpoint.node_id(),
@@ -89,31 +87,37 @@ impl ConnectionManager<SharedConnection> for RpcManager {
                 conn
             }
 
-            // We have accepted connections for this - re-use them.
-            (Entry::Vacant(_), Entry::Occupied(accepted_conns)) => {
-                tracing::trace!("reusing accepted connection...");
-                let conn = accepted_conns
-                    .get()
-                    .values()
-                    // Filter out closed connections as a best-effort in case they were closed while we were holding the lock
-                    .filter(|conn| conn.close_reason().is_none())
-                    // Hmm. Using "lowest RTT" as an arbitrary measure now.
-                    .min_by_key(|conn| conn.rtt())
-                    .expect("always one conn in ConnectionSet entry")
-                    .clone();
-                tracing::debug!(conn = conn.shared_id(), "reusing accepted connection");
-                conn
-            }
-
-            // We have already initiated a connection for this - reuse it.
-            (Entry::Occupied(initiated_conn), Entry::Vacant(_)) => {
-                let conn = initiated_conn.get().clone();
-                tracing::debug!(conn = conn.shared_id(), "reusing initiated connection");
-                conn
-            }
-
             // We have both initiated a connection for this, but also accepted some - potentially close ours.
-            (Entry::Occupied(initiated_conn), Entry::Occupied(accepted_conns)) => {
+            Entry::Occupied(existing) => {
+                let conn = if existing.get().initiated {
+                    existing.get().clone()
+                } else if self.prefer_initiated(remote_node_id) {
+                    let conn = self.open_connection(remote_node_id, alpn).await?;
+                    existing.remove().close(
+                        Self::CLOSE_CONNECTION_SUPERSEDED_CODE.into(),
+                        &Self::CLOSE_CONNECTION_SUPERSEDED_MSG,
+                    );
+                    conns.insert(remote_node_id, conn.clone());
+                    conn
+                } else {
+                    todo!();
+                    conn
+                };
+
+                match self.preferred_connection(existing.get().clone(), conn.clone())? {
+                    Either::Left(c) => {
+                        tracing::debug!(conn = c.shared_id(), "reusing existing connection");
+                        existing.remove().close(
+                            Self::CLOSE_CONNECTION_SUPERSEDED_CODE.into(),
+                            &Self::CLOSE_CONNECTION_SUPERSEDED_MSG,
+                        );
+                        c
+                    }
+                    Either::Right(c) => {
+                        tracing::debug!(conn = c.shared_id(), "using new connection");
+                        c
+                    }
+                }
                 if !self.prefer_initiated(remote_node_id) {
                     initiated_conn.remove().close(
                         Self::CLOSE_CONNECTION_SUPERSEDED_CODE.into(),
@@ -361,6 +365,22 @@ impl RpcManager {
         our_way.as_bytes() < remote_way.as_bytes()
     }
 
+    fn preferred_connection(
+        &self,
+        c1: SharedConnection,
+        c2: SharedConnection,
+    ) -> Result<Either<SharedConnection, SharedConnection>> {
+        let remote = c1.remote_node_id()?;
+        debug_assert_eq!(remote, c2.remote_node_id()?);
+        debug_assert!(c1.initiated != c2.initiated);
+        let prefer_initiated = self.prefer_initiated(remote);
+        if prefer_initiated == c1.initiated {
+            Ok(Either::Left(c1))
+        } else {
+            Ok(Either::Right(c2))
+        }
+    }
+
     pub fn endpoint(&self) -> &Endpoint {
         &self.endpoint
     }
@@ -375,62 +395,4 @@ impl Drop for RpcManager {
 
 // Private
 
-#[derive(Debug, Default)]
-struct Connections {
-    pub initiated: BTreeMap<(NodeId, Alpn), SharedConnection>,
-    pub accepted: ConnectionSet,
-}
-
-// impl Debug for Connections {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         let initiated = self
-//             .initiated
-//             .iter()
-//             .map(|((k, _), _)| k)
-//             .collect::<Vec<_>>();
-
-//         let accepted = self
-//             .accepted
-//             .inner
-//             .iter()
-//             .map(|((k, _), v)| (k, v.len()))
-//             .collect::<Vec<_>>();
-
-//         f.debug_struct("Connections")
-//             .field("initiated", &initiated)
-//             .field("accepted", &accepted)
-//             .finish()
-//     }
-// }
-
-#[derive(Debug, Default)]
-pub struct ConnectionSet {
-    pub inner: BTreeMap<(NodeId, Alpn), BTreeMap<u64, SharedConnection>>,
-}
-
-impl ConnectionSet {
-    pub fn insert(&mut self, node_id: NodeId, alpn: Alpn, conn: SharedConnection) -> Result<()> {
-        let conns = self.inner.entry((node_id, alpn)).or_default();
-        const CONN_LIMIT: usize = 5;
-        anyhow::ensure!(conns.len() <= CONN_LIMIT, "Connection limit exceeded");
-        conns.insert(conn.shared_id(), conn);
-        Ok(())
-    }
-
-    pub fn remove(&mut self, node_id: NodeId, alpn: Alpn, conn: &SharedConnection) {
-        if let Entry::Occupied(mut entry) = self.inner.entry((node_id, alpn)) {
-            entry.get_mut().remove(&conn.shared_id());
-            if entry.get().is_empty() {
-                entry.remove();
-            }
-        }
-    }
-
-    pub fn get_conns(
-        &mut self,
-        node_id: NodeId,
-        alpn: Alpn,
-    ) -> Entry<'_, (NodeId, Alpn), BTreeMap<u64, SharedConnection>> {
-        self.inner.entry((node_id, alpn))
-    }
-}
+type Connections = BTreeMap<NodeId, SharedConnection>;

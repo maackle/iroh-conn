@@ -3,8 +3,8 @@ pub use handler::ConnectionHandler;
 
 mod manager;
 
-pub mod maackle;
 pub mod matheus;
+pub mod rpc_manager;
 
 #[cfg(feature = "modeling")]
 pub mod event;

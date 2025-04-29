@@ -202,6 +202,7 @@ pub struct EchoHandler(EventMappingShared);
 #[derive(Clone, Debug, derive_more::Deref, derive_more::Constructor)]
 pub struct SharedConnection {
     pub id: u64,
+    pub initiated: bool,
 
     #[deref]
     pub conn: Connection,
@@ -239,6 +240,7 @@ impl ConnectionHandler<SharedConnection> for EchoHandler {
                 conn.open_uni().await?.write_all(&id.to_be_bytes()).await?;
                 SharedConnection {
                     conn: conn.clone(),
+                    initiated,
                     id,
                 }
             } else {
@@ -247,6 +249,7 @@ impl ConnectionHandler<SharedConnection> for EchoHandler {
                 let id = u64::from_be_bytes(buf);
                 SharedConnection {
                     conn: conn.clone(),
+                    initiated,
                     id,
                 }
             };
